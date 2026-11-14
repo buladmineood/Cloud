@@ -1,8 +1,8 @@
 import {
   api, confirmDialog, downloadCsv, emptyState, fatal, field, formatDate, formatTime, formDialog, formValues, h, icon, linkBox,
   money, mountShell, norm, num, pageHead, parseNum, pill, round2, selectField, setOrg, showError, showFieldErrors, timeAgo, toast, today,
-} from './core.js?v=0b6ba6118e';
-import { buildPdf, saveFile } from './pdf.js?v=0b6ba6118e';
+} from './core.js?v=bf08f3b745';
+import { buildPdf, saveFile } from './pdf.js?v=bf08f3b745';
 
 let shell;
 let main;
@@ -15,9 +15,9 @@ const PLATFORM_ADMIN = 'Администратор на БУЛАДМИН';
 
 const PAGE_SIZE = 50;
 const OPEN_STAGES = ['Нова', 'Квалифицирана', 'Оферта', 'Преговори'];
-const ENTITY_ICONS = { companies: 'building', contacts: 'users', deals: 'handshake', activities: 'check', products: 'box', documents: 'doc', payments: 'wallet' };
+const ENTITY_ICONS = { companies: 'building', contacts: 'users', deals: 'handshake', activities: 'check', tenders: 'scale', products: 'box', documents: 'doc', payments: 'wallet' };
 // Колоната, по която се филтрира с бутони в списъка на всеки раздел.
-const CHIP_COLUMN = { companies: 'relation', deals: 'stage', activities: 'activityStatus', products: 'itemType' };
+const CHIP_COLUMN = { companies: 'relation', deals: 'stage', activities: 'activityStatus', tenders: 'stage', products: 'itemType' };
 const PAYMENT_METHODS = ['Банков превод', 'В брой', 'С карта', 'Наложен платеж'];
 
 const role = () => data?.role || '';
@@ -113,6 +113,20 @@ const plainValue = (column, record) => {
 
 // --- Общ формуляр за запис според схемата ---
 
+// Раздел, който планът включва (обществените поръчки са само в някои планове).
+const sectionAllowed = (entity) => !meta.entities[entity]?.feature || data?.plan?.[meta.entities[entity].feature] === 'Да';
+// Връзка към раздел, който планът не включва, не се показва във формулярите.
+const refAllowed = (column) => !column.ref || sectionAllowed(column.ref);
+
+// Дата и час от сървъра (UTC) към полето datetime-local по местното време на браузъра.
+function toLocalInput(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function inputFor(entity, column, value) {
   const id = `f-${column.name}`;
   const wrapClass = column.wide || column.kind === 'multiline' ? 'full' : '';
@@ -133,8 +147,8 @@ function inputFor(entity, column, value) {
     input = h('textarea', { id, name: column.name, maxlength: 8000, rows: 4 });
     input.value = value || '';
   } else {
-    const type = { email: 'email', tel: 'tel', url: 'url' }[column.input] || (column.kind === 'day' ? 'date' : 'text');
-    const display = column.kind === 'number' && value !== '' && value !== undefined ? String(value).replace('.', ',') : value;
+    const type = { email: 'email', tel: 'tel', url: 'url', datetime: 'datetime-local' }[column.input] || (column.kind === 'day' ? 'date' : 'text');
+    const display = column.kind === 'number' && value !== '' && value !== undefined ? String(value).replace('.', ',') : column.input === 'datetime' ? toLocalInput(value) : value;
     input = h('input', {
       id, name: column.name, type, value: display ?? '', maxlength: 255,
       inputmode: column.kind === 'number' ? 'decimal' : column.input === 'eik' ? 'numeric' : undefined,
@@ -152,7 +166,7 @@ async function editRecord(entity, record = null, presets = {}) {
     values.assignedTo ??= me.user.email;
     values.dueDate ??= today();
   }
-  const fields = h('div', { class: 'form__grid' }, def.columns.filter((c) => !c.system).map((c) => inputFor(entity, c, values[c.name])));
+  const fields = h('div', { class: 'form__grid' }, def.columns.filter((c) => !c.system && refAllowed(c)).map((c) => inputFor(entity, c, values[c.name])));
   const saved = await formDialog({
     title: record ? `${def.single}: промяна` : `Нов запис: ${def.single.toLowerCase()}`,
     fields,
@@ -202,6 +216,8 @@ function taskRow(a) {
 
 const unpaid = () => data.documents.filter((d) => d.docType === 'Фактура' && d.docStatus === 'Издаден' && d.paymentStatus !== 'Платен');
 const outstanding = (d) => round2(d.total - d.paidAmount);
+// Равностойност в евро: сумите в документи в чужда валута се превръщат по курса на документа.
+const outstandingEur = (d) => round2((d.totalEur ?? d.total) - (d.paidAmountEur ?? d.paidAmount));
 
 function viewDashboard() {
   const month = today().slice(0, 7);
@@ -213,7 +229,7 @@ function viewDashboard() {
   const overdueDocs = unpaidDocs.filter((d) => d.dueDate < today());
   const invoiced = data.documents
     .filter((d) => TAX.includes(d.docType) && d.docStatus === 'Издаден' && d.issueDate.startsWith(month))
-    .reduce((sum, d) => sum + d.subtotal, 0);
+    .reduce((sum, d) => sum + (d.subtotalEur ?? d.subtotal), 0);
   const won = data.deals.filter((d) => d.stage === 'Спечелена' && String(d.closedAt).startsWith(month));
 
   const limited = Object.keys(meta.limits).filter((k) => data.plan[k] !== '');
@@ -227,19 +243,24 @@ function viewDashboard() {
         h('p', {}, near.map((k) => `${meta.limits[k].label}: ${limitText(k)}`).join(' · ')))),
     overdueDocs.length > 0 && h('a', { class: 'alert alert--error banner banner--link', href: '#/documents?type=Фактура&pay=unpaid' }, icon('alert'),
       h('div', { class: 'banner__text' },
-        h('strong', {}, `Просрочени фактури: ${overdueDocs.length} за ${money(overdueDocs.reduce((s, d) => s + outstanding(d), 0))}`),
+        h('strong', {}, `Просрочени фактури: ${overdueDocs.length} за ${money(overdueDocs.reduce((s, d) => s + outstandingEur(d), 0))}`),
         h('p', {}, 'Падежът им е минал, а не са платени изцяло.'))),
     h('div', { class: 'kpis' },
       kpi('check', 'Мои задачи за днес и просрочени', dueNow.length, '#/activities', overdueTasks.length ? 'kpi--danger' : dueNow.length ? 'kpi--warn' : ''),
       kpi('handshake', `Отворени сделки · ${money(openDeals.reduce((s, d) => s + (Number(d.amount) || 0), 0))}`, openDeals.length, '#/deals', 'kpi--accent'),
       kpi('chart', `Спечелени този месец · ${money(won.reduce((s, d) => s + (Number(d.amount) || 0), 0))}`, won.length, '#/deals'),
       kpi('doc', 'Фактурирано този месец без ДДС', money(invoiced), '#/documents?type=Фактура'),
-      kpi('wallet', 'Неплатени фактури', money(unpaidDocs.reduce((s, d) => s + outstanding(d), 0)), '#/documents?type=Фактура&pay=unpaid', overdueDocs.length ? 'kpi--warn' : '')),
+      kpi('wallet', 'Неплатени фактури', money(unpaidDocs.reduce((s, d) => s + outstandingEur(d), 0)), '#/documents?type=Фактура&pay=unpaid', overdueDocs.length ? 'kpi--warn' : '')),
     h('div', { class: 'grid-2' },
       panel('Моите задачи', '#/activities', tasks.slice(0, 8).map(taskRow), 'Нямате предстоящи задачи.'),
+      sectionAllowed('tenders') && panel('Срокове по обществени поръчки', '#/tenders', data.tenders
+        .filter((t) => TENDER_OPEN.includes(t.stage) && t.submissionDeadline && Date.parse(t.submissionDeadline) > Date.now())
+        .sort((a, b) => a.submissionDeadline.localeCompare(b.submissionDeadline)).slice(0, 6)
+        .map((t) => compactRow(`#/tenders/${t.id}`, t.tenderName, `${t.authority} · ${t.stage}`, h('span', { class: `deadline ${Date.parse(t.submissionDeadline) - Date.now() < 3 * 864e5 ? 'deadline--soon' : ''}` }, formatTime(t.submissionDeadline)))),
+      'Няма предстоящи срокове за подаване.'),
       panel('Неплатени фактури', '#/documents?type=Фактура&pay=unpaid', unpaidDocs.slice(0, 8).map((d) => compactRow(`#/documents/${d.id}`,
         `№ ${d.number} · ${d.companyName}`, `Падеж ${formatDate(d.dueDate)}`,
-        h('span', { class: d.dueDate < today() ? 'text-error' : '' }, money(outstanding(d))))), 'Няма неплатени фактури.')),
+        h('span', { class: d.dueDate < today() ? 'text-error' : '' }, money(outstanding(d), d.currency)))), 'Няма неплатени фактури.')),
     h('div', { class: 'grid-2' },
       panel('Сделки в процес', '#/deals', [...openDeals].sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0)).slice(0, 8)
         .map((d) => compactRow(`#/deals/${d.id}`, d.dealName, `${titleOf('companies', find('companies', d.companyId))} · ${d.stage}`, h('span', {}, money(d.amount)))),
@@ -405,7 +426,7 @@ function documentsTable(rows, state, rerender) {
         h('td', { 'data-label': 'Вид' }, d.docType),
         h('td', { 'data-label': 'Дата' }, formatDate(d.issueDate)),
         h('td', { 'data-label': 'Контрагент' }, d.companyName || titleOf('companies', find('companies', d.companyId))),
-        h('td', { 'data-label': 'Сума', class: 'num' }, money(d.total)),
+        h('td', { 'data-label': 'Сума', class: 'num' }, money(d.total, d.currency)),
         h('td', { 'data-label': 'Статус' }, pill(d.docStatus, 'doc')),
         h('td', { 'data-label': 'Плащане' }, d.docType === 'Фактура' || d.docType === 'Проформа фактура' ? (d.docStatus === 'Издаден' ? pill(d.paymentStatus, 'pay') : '') : ''));
       tr.addEventListener('click', (event) => { if (!event.target.closest('a, button')) location.hash = href; });
@@ -452,8 +473,8 @@ async function viewRecord(entity, id) {
         documentsTable(data.documents.filter((d) => d.companyId === id).sort((a, b) => b.issueDate.localeCompare(a.issueDate)))
           || h('p', { class: 'muted small card__empty' }, 'Няма документи.')));
     const docs = data.documents.filter((d) => d.companyId === id && d.docStatus === 'Издаден');
-    const due = docs.filter((d) => d.docType === 'Фактура' && d.paymentStatus !== 'Платен').reduce((s, d) => s + outstanding(d), 0);
-    const turnover = docs.filter((d) => TAX.includes(d.docType)).reduce((s, d) => s + d.subtotal, 0);
+    const due = docs.filter((d) => d.docType === 'Фактура' && d.paymentStatus !== 'Платен').reduce((s, d) => s + outstandingEur(d), 0);
+    const turnover = docs.filter((d) => TAX.includes(d.docType)).reduce((s, d) => s + (d.subtotalEur ?? d.subtotal), 0);
     side.push(h('section', { class: 'card' }, h('dl', { class: 'details details--stacked' },
       h('dt', {}, 'Оборот без ДДС'), h('dd', { class: 'big-num' }, money(turnover)),
       h('dt', {}, 'Дължимо'), h('dd', { class: `big-num ${due > 0 ? 'text-error' : ''}` }, money(due)))));
@@ -477,6 +498,8 @@ async function viewRecord(entity, id) {
         documentsTable(data.documents.filter((d) => d.dealId === id)) || h('p', { class: 'muted small card__empty' }, 'Няма документи.')));
   }
 
+  if (entity === 'tenders') tenderSections(record, content, side);
+
   if (entity === 'activities' && canEdit() && record.activityStatus === 'Предстои') {
     side.push(h('section', { class: 'card stack-tight' },
       h('button', { class: 'btn btn--wide', type: 'button', onclick: () => act(() => api(`/data/activities/${id}`, { method: 'PATCH', body: { activityStatus: 'Изпълнена' } }), 'Задачата е изпълнена.').then(route) }, icon('check', 18), 'Изпълнена')));
@@ -493,6 +516,133 @@ async function viewRecord(entity, id) {
     h('a', { class: 'back', href: `#/${entity}` }, icon('back', 16), def.label),
     pageHead(titleOf(entity, record), def.single, ...recordActions(entity, record)),
     h('div', { class: 'split' }, h('div', { class: 'stack' }, content), h('div', { class: 'stack' }, side)));
+}
+
+// Раздел, който планът не включва: какво дава и как се получава.
+function viewUpsell(entity) {
+  const feature = meta.entities[entity].feature;
+  page(pageHead(meta.entities[entity].label, `Не е включено в плана „${data.plan.name}“.`),
+    h('section', { class: 'card stack narrow' },
+      h('h2', {}, 'Модул „ЦАИС ЕОП — Стопански субект“'),
+      h('p', {}, 'За фирми, които участват в обществени поръчки по ЗОП чрез Централизираната автоматизирана информационна система „Електронни обществени поръчки“ (ЦАИС ЕОП):'),
+      h('ul', { class: 'bullets' },
+        h('li', {}, 'регистър на поръчките: номер в ЦАИС ЕОП, възложител, вид процедура, CPV, обособени позиции, прогнозна стойност;'),
+        h('li', {}, 'срокове за въпроси, подаване и отваряне с напомняне по имейл 3 дни преди тях;'),
+        h('li', {}, 'списък с документите за участие (ЕЕДОП, техническо и ценово предложение и др.) и за сключване на договор;'),
+        h('li', {}, 'гаранции за участие и изпълнение, етапи до договор, връзка със сделки, оферти и задачи.')),
+      h('p', { class: 'small muted' }, `Модулът е в плана „ЦАИС ЕОП“ и в „Професионален“. ${FEATURE_HELP}`),
+      h('div', {}, h('a', { class: 'btn', href: 'mailto:call@buladmin.eu?subject=План ЦАИС ЕОП' }, 'Поискайте план „ЦАИС ЕОП“'))));
+  return feature;
+}
+const FEATURE_HELP = 'Плановете се сменят от администраторите на БУЛАДМИН.';
+
+// --- ЦАИС ЕОП: участие в обществени поръчки ---
+
+// Курсът се показва с 4 до 6 знака, както го публикува ЕЦБ.
+const rateText = (rate) => new Intl.NumberFormat('bg-BG', { minimumFractionDigits: 4, maximumFractionDigits: 6 }).format(rate);
+
+const TENDER_OPEN = ['Проучване', 'Подготовка', 'Подадена', 'Оценка', 'Класирана първа'];
+
+// Колко остава до срока, по-четимо от точния час.
+function countdown(iso) {
+  const ms = Date.parse(iso) - Date.now();
+  if (Number.isNaN(ms)) return '';
+  if (ms < 0) return 'изтекъл';
+  const hours = Math.floor(ms / 3600000);
+  if (hours < 48) return `остават ${hours} ч`;
+  return `остават ${Math.floor(hours / 24)} дни`;
+}
+
+function deadlineRow(label, iso) {
+  if (!iso) return null;
+  const ms = Date.parse(iso) - Date.now();
+  const tone = ms < 0 ? 'deadline--over' : ms < 3 * 864e5 ? 'deadline--soon' : '';
+  return [h('dt', {}, label), h('dd', {}, h('strong', {}, formatTime(iso)), ' ', h('span', { class: `deadline ${tone}` }, countdown(iso)))];
+}
+
+function tenderSections(record, content, side) {
+  const id = record.id;
+  if (canEdit()) {
+    content.unshift(h('section', { class: 'card' },
+      h('h2', { class: 'card__title' }, 'Етап'),
+      h('div', { class: 'stage-bar stage-bar--wrap', role: 'group', 'aria-label': 'Етап на поръчката' }, col('tenders', 'stage').choices.map((stage) => h('button', {
+        type: 'button', class: 'stage-bar__step', 'aria-pressed': String(record.stage === stage), 'data-stage': stage,
+        onclick: () => record.stage !== stage && act(() => api(`/data/tenders/${id}`, { method: 'PATCH', body: { stage } }), `Етап: ${stage}`).then(route),
+      }, stage)))));
+  }
+
+  // Списък с документи: състояние на всеки и бележка; точките са редактируеми за конкретната поръчка.
+  let items = (record.checklist || []).map((i) => ({ ...i }));
+  const list = h('div', { class: 'checklist' });
+  const progress = h('span', { class: 'small muted' });
+  const save = h('button', { class: 'btn btn--small', type: 'button', hidden: true }, 'Запазете промените');
+  const dirty = () => { save.hidden = false; };
+  const render = () => {
+    const needed = items.filter((i) => i.state !== 'Неприложим');
+    progress.textContent = `готови ${needed.filter((i) => i.state === 'Готов').length} от ${needed.length}`;
+    const groups = [...new Set(items.map((i) => i.group))];
+    fill(list, groups.map((group) => h('div', { class: 'checklist__group' },
+      h('h3', {}, group),
+      items.filter((i) => i.group === group).map((item) => h('div', { class: `checklist__item checklist__item--${item.state === 'Готов' ? 'done' : item.state === 'Неприложим' ? 'na' : 'todo'}` },
+        h('select', {
+          'aria-label': `Състояние: ${item.label}`, disabled: !canEdit(),
+          onchange: (e) => { item.state = e.target.value; dirty(); render(); },
+        }, meta.checklistStates.map((s) => h('option', { value: s, selected: s === item.state }, s))),
+        h('div', { class: 'checklist__text' },
+          h('span', {}, item.label),
+          canEdit()
+            ? h('input', { class: 'checklist__note', value: item.note || '', placeholder: 'бележка (по желание)', maxlength: 300, 'aria-label': `Бележка: ${item.label}`, oninput: (e) => { item.note = e.target.value; dirty(); } })
+            : item.note && h('span', { class: 'small muted' }, item.note)),
+        canEdit() && h('button', {
+          class: 'icon-btn', type: 'button', title: 'Махнете от списъка', 'aria-label': `Махнете „${item.label}“`,
+          onclick: () => { items = items.filter((x) => x !== item); dirty(); render(); },
+        }, icon('trash', 16)))))));
+  };
+  render();
+  save.addEventListener('click', async () => {
+    const saved = await act(() => api(`/tenders/${id}/checklist`, { method: 'PUT', body: { items } }), 'Документите са запазени.');
+    if (saved) route();
+  });
+  const addItem = async () => {
+    const result = await formDialog({
+      title: 'Нов документ в списъка',
+      fields: [field({ name: 'label', label: 'Документ', required: true, maxlength: 300 }),
+        selectField({ name: 'group', label: 'Кога', options: ['Оферта', 'Преди договор'], value: 'Оферта' })],
+      submitLabel: 'Добавете',
+    });
+    if (result?.label) {
+      items.push({ id: `u${Date.now()}`, label: result.label, group: result.group, state: 'Предстои', note: '' });
+      dirty();
+      render();
+    }
+  };
+  content.push(h('section', { class: 'card stack' },
+    h('div', { class: 'row row--between' }, h('h2', {}, 'Документи за участие'), progress),
+    h('p', { class: 'small muted' }, 'Типичните документи по ЗОП. Конкретните изисквания са в документацията на поръчката — отбележете ненужните като „Неприложим“ и добавете липсващите.'),
+    list,
+    canEdit() && h('div', { class: 'row' }, h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: addItem }, icon('plus', 16), 'Добавете документ'), save)));
+
+  content.push(
+    relatedCard('Задачи', 'activities', data.activities.filter((a) => a.tenderId === id), ['subject', 'dueDate', 'activityStatus', 'assignedTo'],
+      addButton('Нова задача', async () => {
+        if (await editRecord('activities', null, { companyId: record.companyId, dealId: record.dealId, tenderId: id })) route();
+      })));
+
+  side.unshift(
+    h('section', { class: 'card stack-tight' },
+      h('h2', { class: 'card__title' }, 'Срокове'),
+      h('dl', { class: 'details details--stacked' },
+        deadlineRow('Въпроси до', record.questionsDeadline),
+        deadlineRow('Подаване на офертата до', record.submissionDeadline),
+        deadlineRow('Отваряне на офертите', record.openingDate),
+        record.validUntil && [h('dt', {}, 'Офертата е валидна до'), h('dd', {}, formatDate(record.validUntil))]),
+      !record.questionsDeadline && !record.submissionDeadline && h('p', { class: 'small muted' }, 'Въведете сроковете от обявлението в ЦАИС ЕОП, за да получавате напомняния.')),
+    h('section', { class: 'card stack-tight' },
+      h('h2', { class: 'card__title' }, 'ЦАИС ЕОП'),
+      record.eopUrl
+        ? h('a', { class: 'btn btn--wide', href: record.eopUrl, target: '_blank', rel: 'noopener noreferrer' }, icon('link', 18), 'Отворете поръчката')
+        : h('a', { class: 'btn btn--ghost btn--wide', href: 'https://app.eop.bg/', target: '_blank', rel: 'noopener noreferrer' }, icon('link', 18), 'app.eop.bg'),
+      h('p', { class: 'small muted' }, 'Офертата се подава само в ЦАИС ЕОП, подписана с КЕП на лицата, които представляват фирмата. Тук водите сроковете, документите и решенията.')));
 }
 
 // --- Сделки: табло по етапи ---
@@ -589,9 +739,9 @@ function viewDocuments(query) {
       return (cmp || String(a.number).localeCompare(String(b.number))) * docState.dir;
     });
     const shown = rows.slice((docState.page - 1) * PAGE_SIZE, docState.page * PAGE_SIZE);
-    const sum = rows.filter((d) => d.docStatus !== 'Анулиран' && d.docStatus !== 'Чернова').reduce((s, d) => s + d.total, 0);
+    const sum = rows.filter((d) => d.docStatus !== 'Анулиран' && d.docStatus !== 'Чернова').reduce((s, d) => s + (d.totalEur ?? d.total), 0);
     fill(results,
-      rows.length > 0 && h('p', { class: 'small muted' }, `${rows.length} документа · издадени за ${money(sum)} с ДДС`),
+      rows.length > 0 && h('p', { class: 'small muted' }, `${rows.length} документа · издадени за ${money(sum)} с ДДС (в евро)`),
       documentsTable(shown, docState, render) || emptyState('doc', 'Няма документи', 'Създайте оферта или фактура.'),
       pager(docState, rows.length, render));
   };
@@ -602,10 +752,10 @@ function viewDocuments(query) {
       h('button', {
         class: 'btn btn--ghost', type: 'button',
         onclick: () => downloadCsv(`documents-${today()}.csv`,
-          ['Вид', 'Номер', 'Дата', 'Данъчно събитие', 'Контрагент', 'ЕИК', 'ДДС номер', 'Основа', 'ДДС', 'Общо', 'Платено', 'Статус', 'Плащане'],
+          ['Вид', 'Номер', 'Дата', 'Данъчно събитие', 'Контрагент', 'ЕИК', 'ДДС номер', 'Валута', 'Курс за 1 EUR', 'Основа', 'ДДС', 'Общо', 'Платено', 'Основа в EUR', 'ДДС в EUR', 'Общо в EUR', 'Статус', 'Плащане'],
           filtered().map((d) => [d.docType, d.number, formatDate(d.issueDate), formatDate(d.taxEventDate), d.companyName || titleOf('companies', find('companies', d.companyId)),
-            d.buyer?.eik || '', d.buyer?.vatNumber || '', String(d.subtotal).replace('.', ','), String(d.vatAmount).replace('.', ','), String(d.total).replace('.', ','),
-            String(d.paidAmount).replace('.', ','), d.docStatus, d.paymentStatus])),
+            d.buyer?.eik || '', d.buyer?.vatNumber || '', d.currency, String(d.exchangeRate).replace('.', ','),
+            ...[d.subtotal, d.vatAmount, d.total, d.paidAmount, d.subtotalEur, d.vatAmountEur, d.totalEur].map((n) => String(n ?? '').replace('.', ',')), d.docStatus, d.paymentStatus])),
       }, icon('download', 18), 'CSV'),
       canEdit() && h('a', { class: 'btn btn--ghost', href: '#/documents/new?type=Оферта' }, icon('plus', 18), 'Оферта'),
       canEdit() && h('a', { class: 'btn', href: '#/documents/new?type=Фактура' }, icon('plus', 18), 'Фактура')),
@@ -619,7 +769,7 @@ function viewDocuments(query) {
 }
 
 // Редове на документа: редактират се на място, а сумите се преизчисляват веднага.
-function linesEditor(initial, onChange) {
+function linesEditor(initial, onChange, currency = () => 'EUR') {
   const products = data.products.filter((p) => p.isActive !== 'Не');
   let lines = initial.map((l) => ({ ...l }));
   const body = h('tbody');
@@ -627,10 +777,10 @@ function linesEditor(initial, onChange) {
 
   const render = () => {
     body.replaceChildren(...lines.map((line, i) => {
-      const totalCell = h('td', { class: 'num', 'data-label': 'Стойност' }, money(lineTotal(line)));
+      const totalCell = h('td', { class: 'num', 'data-label': 'Стойност' }, money(lineTotal(line), currency()));
       const update = (key) => (event) => {
         line[key] = event.target.value;
-        totalCell.textContent = money(lineTotal(line));
+        totalCell.textContent = money(lineTotal(line), currency());
         onChange(lines);
       };
       const product = h('select', {
@@ -671,6 +821,7 @@ function linesEditor(initial, onChange) {
         body)),
       add),
     get: () => lines.map((l) => ({ ...l, qty: parseNum(l.qty), price: parseNum(l.price), discount: parseNum(l.discount), vatRate: Number(l.vatRate) })),
+    refresh: render,
   };
 }
 
@@ -687,10 +838,17 @@ function totalsOf(lines, docType) {
   return { byRate, subtotal, vat, total: round2(subtotal + vat) };
 }
 
-function totalsBlock(t) {
+// Суми по ставки. При документ в чужда валута данъчната основа и ДДС се показват и в евро по курса на документа.
+function totalsBlock(t, currency = 'EUR', rate = 1, rateDate = '') {
+  const foreign = currency !== 'EUR' && rate > 0;
+  const eur = (n) => round2(n / rate);
   return h('dl', { class: 'totals' },
-    t.byRate.flatMap((r) => [h('dt', {}, `Данъчна основа ${r.rate}%`), h('dd', {}, money(r.base)), h('dt', {}, `ДДС ${r.rate}%`), h('dd', {}, money(r.vat))]),
-    h('dt', { class: 'totals__grand' }, 'Сума за плащане'), h('dd', { class: 'totals__grand' }, money(t.total)));
+    t.byRate.flatMap((r) => [h('dt', {}, `Данъчна основа ${r.rate}%`), h('dd', {}, money(r.base, currency)), h('dt', {}, `ДДС ${r.rate}%`), h('dd', {}, money(r.vat, currency))]),
+    h('dt', { class: 'totals__grand' }, 'Сума за плащане'), h('dd', { class: 'totals__grand' }, money(t.total, currency)),
+    foreign && [
+      h('dt', { class: 'totals__note' }, `В евро по курс 1 EUR = ${rateText(rate)} ${currency}${rateDate ? ` (ЕЦБ, ${formatDate(rateDate)})` : ''}`), h('dd', {}),
+      ...t.byRate.flatMap((r) => [h('dt', {}, `Данъчна основа ${r.rate}% в EUR`), h('dd', {}, money(eur(r.base))), h('dt', {}, `ДДС ${r.rate}% в EUR`), h('dd', {}, money(eur(r.vat)))]),
+      h('dt', {}, 'Общо в EUR'), h('dd', {}, money(eur(t.total)))]);
 }
 
 function documentEditor(doc, query) {
@@ -705,9 +863,51 @@ function documentEditor(doc, query) {
     if (deal) values.companyId = deal.companyId;
     if (deal?.amount) values.lines = [{ productId: '', name: deal.dealName, qty: 1, unit: 'бр.', price: deal.amount, discount: '', vatRate: data.company.vatRegistered === 'Не' ? 0 : 20 }];
   }
+  // Валута, курс и сметка. Другите валути са само при план с тази възможност.
+  const canForeign = data.plan.allowCurrencies === 'Да';
+  const accounts = data.company.bankAccounts || [];
+  let currency = values.currency || 'EUR';
+  const currencySelect = h('select', { id: 'f-currency', name: 'currency', disabled: !canForeign && currency === 'EUR' },
+    (canForeign ? meta.currencies : ['EUR']).map((c) => h('option', { value: c, selected: c === currency }, c)));
+  const rateInput = h('input', { id: 'f-exchangeRate', name: 'exchangeRate', type: 'text', inputmode: 'decimal', value: values.exchangeRate && currency !== 'EUR' ? String(values.exchangeRate).replace('.', ',') : '' });
+  const rateDateInput = h('input', { type: 'hidden', name: 'rateDate', value: values.rateDate || '' });
+  const rateNote = h('span', { class: 'field__hint' });
+  const accountSelect = h('select', { id: 'f-bankAccount', name: 'bankAccount' },
+    accounts.length ? accounts.map((a) => h('option', { value: a.iban, selected: a.iban === values.bankAccount }, `${a.label ? `${a.label} · ` : ''}${a.iban} (${a.currency})`))
+      : h('option', { value: '' }, 'Няма въведена сметка — добавете от „Настройки“'));
+  const currentRate = () => (currency === 'EUR' ? 1 : parseNum(rateInput.value));
   const totalsBox = h('div');
-  const showTotals = (lines) => totalsBox.replaceChildren(totalsBlock(totalsOf(lines, docType)));
-  const editor = linesEditor(values.lines.length ? values.lines : [{ productId: '', name: '', qty: 1, unit: 'бр.', price: '', discount: '', vatRate: data.company.vatRegistered === 'Не' ? 0 : 20 }], showTotals);
+  const showTotals = (lines) => totalsBox.replaceChildren(totalsBlock(totalsOf(lines, docType), currency, currentRate(), rateDateInput.value));
+  const editor = linesEditor(values.lines.length ? values.lines : [{ productId: '', name: '', qty: 1, unit: 'бр.', price: '', discount: '', vatRate: data.company.vatRegistered === 'Не' ? 0 : 20 }], showTotals, () => currency);
+  const rateField = h('div', { class: 'field', hidden: currency === 'EUR' },
+    h('label', { for: 'f-exchangeRate' }, 'Курс: единици валута за 1 EUR ', rateNote),
+    h('div', { class: 'row-tight' }, rateInput, h('button', {
+      class: 'btn btn--ghost btn--small', type: 'button',
+      onclick: async () => {
+        const issueDate = form.elements.taxEventDate?.value || form.elements.issueDate.value || today();
+        try {
+          const r = await api(`/rates?currency=${currency}&date=${issueDate}`);
+          rateInput.value = String(r.rate).replace('.', ',');
+          rateDateInput.value = r.rateDate;
+          rateNote.textContent = `(ЕЦБ към ${formatDate(r.rateDate)})`;
+          showTotals(editor.get());
+        } catch (err) {
+          toast(err.message, 'error');
+        }
+      },
+    }, 'Курс на ЕЦБ')), rateDateInput);
+  if (values.rateDate) rateNote.textContent = `(ЕЦБ към ${formatDate(values.rateDate)})`;
+  currencySelect.addEventListener('change', () => {
+    currency = currencySelect.value;
+    rateField.hidden = currency === 'EUR';
+    if (currency === 'EUR') { rateInput.value = ''; rateDateInput.value = ''; rateNote.textContent = ''; }
+    // Сметка във валутата на документа, ако има такава.
+    const match = accounts.find((a) => a.currency === currency);
+    if (match) accountSelect.value = match.iban;
+    editor.refresh();
+    showTotals(editor.get());
+  });
+  rateInput.addEventListener('input', () => { rateDateInput.value = ''; rateNote.textContent = '(въведен ръчно)'; showTotals(editor.get()); });
   showTotals(editor.get());
   const alert = h('div', { 'aria-live': 'polite' });
   const companies = [...data.companies].sort((a, b) => a.name.localeCompare(b.name, 'bg'));
@@ -727,6 +927,10 @@ function documentEditor(doc, query) {
         field({ name: 'dueDate', label: docType === 'Оферта' ? 'Валидна до' : 'Падеж', type: 'date', value: values.dueDate, hint: 'празно = по подразбиране' }),
         TAX.includes(docType) && field({ name: 'taxEventDate', label: 'Дата на данъчно събитие', type: 'date', value: values.taxEventDate, hint: 'ако е различна' }),
         selectField({ name: 'paymentMethod', label: 'Начин на плащане', options: PAYMENT_METHODS, value: values.paymentMethod }),
+        h('div', { class: 'field' }, h('label', { for: 'f-bankAccount' }, 'Банкова сметка'), accountSelect),
+        h('div', { class: 'field' }, h('label', { for: 'f-currency' }, 'Валута',
+          !canForeign && h('span', { class: 'field__hint' }, ' (други валути — с платен план)')), currencySelect),
+        rateField,
         field({ name: 'vatExemptReason', label: 'Основание за 0% ДДС', value: values.vatExemptReason, hint: 'при нулева ставка', wrapClass: 'full', maxlength: 255 }),
         h('div', { class: 'field full' }, h('label', { for: 'f-notes' }, 'Забележки', h('span', { class: 'field__hint' }, ' (по желание)')),
           h('textarea', { id: 'f-notes', name: 'notes', rows: 3, maxlength: 8000 }, values.notes || '')))),
@@ -800,6 +1004,14 @@ function buyerOf(doc) {
   return { name: c.name, eik: c.eik, vatNumber: c.vatNumber, mol: c.mol, city: c.city, address: c.address };
 }
 
+// Доставчикът: при издаден документ — както е записан при издаването; при чернова — фирмата с избраната сметка.
+function sellerOf(doc) {
+  if (doc.seller) return doc.seller;
+  const { bankAccounts = [], ...company } = data.company;
+  const account = bankAccounts.find((a) => a.iban === doc.bankAccount) || bankAccounts[0];
+  return account ? { ...company, iban: account.iban, bic: account.bic, bank: account.bank } : company;
+}
+
 // Логото е платена възможност: показва се само ако планът го позволява.
 const showLogo = () => !!data?.org.hasLogo && data.plan.allowLogo === 'Да';
 let logoVersion = Date.now();
@@ -816,7 +1028,7 @@ function logoBytes() {
 async function makePdf(doc) {
   return buildPdf({
     doc,
-    seller: doc.seller || data.company,
+    seller: sellerOf(doc),
     buyer: buyerOf(doc),
     logo: await logoBytes(),
     related: doc.relatedId && find('documents', doc.relatedId),
@@ -826,7 +1038,8 @@ async function makePdf(doc) {
 const pdfName = (doc) => `${doc.docType} ${doc.number || 'чернова'}.pdf`;
 
 function documentPrint(doc) {
-  const seller = doc.seller || data.company;
+  const seller = sellerOf(doc);
+  const cur = doc.currency || 'EUR';
   const buyer = buyerOf(doc);
   const t = totalsOf(doc.lines, doc.docType);
   const related = doc.relatedId && find('documents', doc.relatedId);
@@ -849,8 +1062,8 @@ function documentPrint(doc) {
       h('thead', {}, h('tr', {}, ['№', 'Наименование', 'Кол.', 'Мярка', 'Ед. цена', 'Отст.', 'ДДС', 'Стойност'].map((x) => h('th', { scope: 'col' }, x)))),
       h('tbody', {}, doc.lines.map((l, i) => h('tr', {},
         h('td', {}, String(i + 1)), h('td', {}, l.name), h('td', { class: 'num' }, num(l.qty)), h('td', {}, l.unit),
-        h('td', { class: 'num' }, money(l.price)), h('td', { class: 'num' }, l.discount ? `${num(l.discount)}%` : ''), h('td', { class: 'num' }, `${l.vatRate}%`),
-        h('td', { class: 'num' }, money(round2(l.qty * l.price * (1 - (l.discount || 0) / 100)))))))),
+        h('td', { class: 'num' }, money(l.price, cur)), h('td', { class: 'num' }, l.discount ? `${num(l.discount)}%` : ''), h('td', { class: 'num' }, `${l.vatRate}%`),
+        h('td', { class: 'num' }, money(round2(l.qty * l.price * (1 - (l.discount || 0) / 100)), cur)))))),
     h('div', { class: 'doc-print__foot' },
       h('div', { class: 'doc-print__pay' },
         h('p', {}, h('strong', {}, 'Начин на плащане: '), doc.paymentMethod || '—'),
@@ -858,7 +1071,7 @@ function documentPrint(doc) {
         doc.vatExemptReason && h('p', {}, h('strong', {}, 'Основание за неначисляване на ДДС: '), doc.vatExemptReason),
         doc.notes && h('p', { class: 'pre' }, doc.notes),
         h('p', { class: 'small' }, `Съставил: ${doc.issuedBy || userName(doc.createdBy)}`)),
-      totalsBlock(t)),
+      totalsBlock(t, cur, doc.exchangeRate || 1, doc.rateDate)),
     h('p', { class: 'doc-print__made' }, 'Създадено с BulAdmin Cloud · cloud.buladmin.eu'));
 }
 
@@ -900,7 +1113,7 @@ async function viewDocument(id, query) {
 
   page(
     h('a', { class: 'back no-print', href: '#/documents' }, icon('back', 16), 'Оферти и фактури'),
-    h('div', { class: 'no-print' }, pageHead(`${doc.docType} ${doc.number}`, `${doc.companyName} · ${money(doc.total)}`,
+    h('div', { class: 'no-print' }, pageHead(`${doc.docType} ${doc.number}`, `${doc.companyName} · ${money(doc.total, doc.currency)}`,
       h('button', {
         class: 'btn', type: 'button', title: 'PDF се създава наново от данните на документа',
         onclick: async (event) => {
@@ -913,34 +1126,83 @@ async function viewDocument(id, query) {
           }
           button.disabled = false;
         },
-      }, icon('download', 18), 'Изтеглете PDF'))),
+      }, icon('download', 18), 'Изтеглете PDF'),
+      canEdit() && ['Издаден', 'Приета', 'Отказана'].includes(doc.docStatus) && h('button', { class: 'btn', type: 'button', onclick: () => sendDialog(doc) }, icon('send', 18), 'Изпратете по имейл'))),
     h('div', { class: 'row no-print' }, pill(doc.docStatus, 'doc'), payable && pill(doc.paymentStatus, 'pay'), actions),
     h('div', { class: 'split' },
       h('div', { class: 'card doc-sheet' }, documentPrint(doc)),
       h('div', { class: 'stack no-print' },
         payable && h('section', { class: 'card stack-tight' },
           h('h2', { class: 'card__title' }, 'Плащания'),
-          h('dl', { class: 'details' }, h('dt', {}, 'Платено'), h('dd', {}, money(doc.paidAmount)), h('dt', {}, 'Остатък'), h('dd', { class: outstanding(doc) > 0 ? 'text-error' : '' }, money(outstanding(doc)))),
+          h('dl', { class: 'details' }, h('dt', {}, 'Платено'), h('dd', {}, money(doc.paidAmount, doc.currency)), h('dt', {}, 'Остатък'), h('dd', { class: outstanding(doc) > 0 ? 'text-error' : '' }, money(outstanding(doc), doc.currency))),
           payments.length ? h('ul', { class: 'pay-list' }, payments.map((p) => h('li', {},
             h('span', {}, `${formatDate(p.paidAt)} · ${p.method}${p.reference ? ` · ${p.reference}` : ''}`),
-            h('strong', {}, money(p.amount)),
+            h('strong', {}, money(p.amount, doc.currency)),
             isAdmin() && h('button', {
               class: 'icon-btn', type: 'button', 'aria-label': 'Изтрийте плащането', title: 'Изтрийте плащането',
-              onclick: async () => { if (await confirmDialog({ title: 'Изтриване на плащане', text: `${money(p.amount)} от ${formatDate(p.paidAt)}`, confirmLabel: 'Изтрийте', danger: true })) act(() => api(`/payments/${p.id}`, { method: 'DELETE' }), 'Плащането е изтрито.').then(route); },
+              onclick: async () => { if (await confirmDialog({ title: 'Изтриване на плащане', text: `${money(p.amount, doc.currency)} от ${formatDate(p.paidAt)}`, confirmLabel: 'Изтрийте', danger: true })) act(() => api(`/payments/${p.id}`, { method: 'DELETE' }), 'Плащането е изтрито.').then(route); },
             }, icon('trash', 16))))) : h('p', { class: 'small muted' }, 'Няма плащания.')),
         children.length > 0 && h('section', { class: 'card card--list' }, h('div', { class: 'card__head' }, h('h2', {}, 'Свързани документи')), documentsTable(children)),
         h('section', { class: 'card' }, h('dl', { class: 'details details--stacked' },
           h('dt', {}, 'Контрагент'), h('dd', {}, refLink('companies', doc.companyId)),
           doc.dealId && [h('dt', {}, 'Сделка'), h('dd', {}, refLink('deals', doc.dealId))],
-          h('dt', {}, 'Издаден'), h('dd', {}, `${formatTime(doc.issuedAt)} · ${doc.issuedBy}`))),
+          h('dt', {}, 'Издаден'), h('dd', {}, `${formatTime(doc.issuedAt)} · ${doc.issuedBy}`),
+          doc.sentAt && [h('dt', {}, 'Изпратен по имейл'), h('dd', {}, `${formatTime(doc.sentAt)} до ${doc.sentTo}`)],
+          doc.docType === 'Оферта' && doc.sentAt && doc.docStatus === 'Издаден' && [h('dt', {}, 'Линк за клиента'), h('dd', {}, 'Клиентът може да приеме или откаже офертата от имейла.')],
+          doc.decisionAt && [h('dt', {}, 'Отговор на клиента'), h('dd', {}, `${doc.docStatus} от ${doc.decisionBy} на ${formatTime(doc.decisionAt)}`)],
+          doc.decisionNote && [h('dt', {}, 'Коментар на клиента'), h('dd', { class: 'pre' }, doc.decisionNote)])),
         await historyCard('documents', id))));
+}
+
+const toBase64 = (bytes) => {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+};
+
+// Изпраща документа като PDF на контрагента. Отговорът му отива на имейла на фирмата.
+async function sendDialog(doc) {
+  if (!meta.mailEnabled) { toast('Имейлите са изключени в системата.', 'error'); return; }
+  const company = find('companies', doc.companyId) || {};
+  const contactEmails = data.contacts.filter((c) => c.companyId === doc.companyId && c.email).map((c) => c.email);
+  const suggested = company.email || contactEmails[0] || '';
+  const isOffer = doc.docType === 'Оферта';
+  const result = await formDialog({
+    title: `Изпратете ${doc.docType.toLowerCase()} № ${doc.number}`,
+    wide: true,
+    fields: [
+      field({ name: 'to', label: 'До', type: 'text', value: suggested, required: true, placeholder: 'имейл, няколко — със запетая', maxlength: 500 }),
+      contactEmails.length > 0 && h('p', { class: 'small muted' }, `Лица за контакт: ${[company.email, ...contactEmails].filter(Boolean).join(', ')}`),
+      field({ name: 'cc', label: 'Копие до', hint: 'по желание', maxlength: 500 }),
+      field({ name: 'subject', label: 'Тема', value: `${doc.docType} № ${doc.number} от ${data.org.name}`, maxlength: 200 }),
+      h('div', { class: 'field' }, h('label', { for: 'f-message' }, 'Съобщение'),
+        h('textarea', { id: 'f-message', name: 'message', rows: 5, maxlength: 4000 },
+          `Здравейте,\n\nизпращаме Ви ${doc.docType.toLowerCase()} № ${doc.number} от ${formatDate(doc.issueDate)} на стойност ${money(doc.total, doc.currency)}. Документът е прикачен като PDF.${isOffer && doc.dueDate ? ` Офертата е валидна до ${formatDate(doc.dueDate)}.` : ''}\n\nПоздрави,\n${me.user.name}\n${data.org.name}`)),
+      h('p', { class: 'small muted' }, [
+        isOffer && doc.docStatus === 'Издаден' && !(doc.dueDate && doc.dueDate < today()) ? 'Клиентът ще получи и линк, през който да приеме или откаже офертата. ' : '',
+        isOffer && doc.dueDate && doc.dueDate < today() ? `Внимание: офертата е валидна до ${formatDate(doc.dueDate)} и клиентът вече не може да я приеме през линка. ` : '',
+        `Отговорите на клиента отиват до ${data.company.email || me.user.email}. `,
+        data.plan.maxEmails !== '' ? `Изпратени този месец: ${limitText('maxEmails')}.` : '',
+      ].join('')),
+    ].filter(Boolean),
+    submitLabel: 'Изпратете',
+    onSubmit: async (body) => {
+      const pdf = toBase64(await makePdf(doc));
+      return api(`/documents/${doc.id}/send`, { method: 'POST', body: { ...body, pdf } });
+    },
+  });
+  if (result) {
+    await refresh();
+    toast(`Изпратено до ${result.sentTo}.`);
+    route();
+  }
 }
 
 async function addPayment(doc) {
   const result = await formDialog({
     title: `Плащане по ${doc.docType.toLowerCase()} № ${doc.number}`,
     fields: h('div', { class: 'form__grid' },
-      field({ name: 'amount', label: 'Сума (EUR)', value: String(outstanding(doc)).replace('.', ','), inputmode: 'decimal', required: true }),
+      field({ name: 'amount', label: `Сума (${doc.currency || 'EUR'})`, value: String(outstanding(doc)).replace('.', ','), inputmode: 'decimal', required: true }),
       field({ name: 'paidAt', label: 'Дата', type: 'date', value: today() }),
       selectField({ name: 'method', label: 'Начин', options: PAYMENT_METHODS, value: doc.paymentMethod || 'Банков превод' }),
       field({ name: 'reference', label: 'Основание / референция', hint: 'по желание', maxlength: 255 })),
@@ -957,10 +1219,14 @@ async function addPayment(doc) {
 function viewPayments() {
   const rows = [...data.payments].sort((a, b) => b.paidAt.localeCompare(a.paidAt));
   const month = today().slice(0, 7);
-  const thisMonth = rows.filter((p) => p.paidAt.startsWith(month)).reduce((s, p) => s + p.amount, 0);
+  // Плащанията са във валутата на документа; сборът е в евро по курса на документа.
+  const docOf = (p) => find('documents', p.documentId);
+  const curOf = (p) => docOf(p)?.currency || 'EUR';
+  const eurOf = (p) => p.amount / (docOf(p)?.exchangeRate || 1);
+  const thisMonth = rows.filter((p) => p.paidAt.startsWith(month)).reduce((s, p) => s + eurOf(p), 0);
   const columns = [
     { name: 'paidAt', label: 'Дата', kind: 'day' }, { name: 'documentId', label: 'Документ' }, { name: 'companyId', label: 'Контрагент', input: 'ref', ref: 'companies' },
-    { name: 'amount', label: 'Сума', kind: 'number', input: 'money' }, { name: 'method', label: 'Начин' }, { name: 'reference', label: 'Основание' },
+    { name: 'amount', label: 'Сума', kind: 'number', input: 'money' }, { name: 'currency', label: 'Валута' }, { name: 'method', label: 'Начин' }, { name: 'reference', label: 'Основание' },
   ];
   const docLabel = (p) => { const d = find('documents', p.documentId); return d ? `${d.docType} № ${d.number}` : ''; };
   page(
@@ -968,7 +1234,7 @@ function viewPayments() {
       h('button', {
         class: 'btn btn--ghost', type: 'button',
         onclick: () => downloadCsv(`payments-${today()}.csv`, columns.map((c) => c.label),
-          rows.map((p) => [formatDate(p.paidAt), docLabel(p), titleOf('companies', find('companies', p.companyId)), String(p.amount).replace('.', ','), p.method, p.reference])),
+          rows.map((p) => [formatDate(p.paidAt), docLabel(p), titleOf('companies', find('companies', p.companyId)), String(p.amount).replace('.', ','), curOf(p), p.method, p.reference])),
       }, icon('download', 18), 'CSV')),
     rows.length ? h('div', { class: 'table-wrap' }, h('table', {},
       h('thead', {}, h('tr', {}, columns.map((c) => h('th', { scope: 'col' }, c.label)))),
@@ -976,7 +1242,8 @@ function viewPayments() {
         h('td', { 'data-label': 'Дата' }, formatDate(p.paidAt)),
         h('td', { 'data-label': 'Документ' }, h('a', { href: `#/documents/${p.documentId}` }, docLabel(p))),
         h('td', { 'data-label': 'Контрагент' }, refLink('companies', p.companyId)),
-        h('td', { 'data-label': 'Сума', class: 'num' }, money(p.amount)),
+        h('td', { 'data-label': 'Сума', class: 'num' }, money(p.amount, curOf(p))),
+        h('td', { 'data-label': 'Валута' }, curOf(p)),
         h('td', { 'data-label': 'Начин' }, p.method),
         h('td', { 'data-label': 'Основание' }, p.reference)))))) : emptyState('wallet', 'Няма плащания', 'Плащанията се отбелязват от страницата на издадена фактура.'));
 }
@@ -1033,6 +1300,7 @@ function viewMe() {
   const nameForm = h('form', { class: 'form', novalidate: true },
     field({ name: 'fullName', label: 'Име и фамилия', value: me.user.name, maxlength: 120 }),
     field({ name: 'jobTitle', label: 'Длъжност', hint: 'по желание', value: me.user.jobTitle, maxlength: 120 }),
+    selectField({ name: 'notifyEmail', label: 'Известия по имейл', options: [['Да', 'Да — възложени задачи, отговори по оферти и сутрешни напомняния'], ['Не', 'Не']], value: me.user.notifyEmail === false ? 'Не' : 'Да' }),
     nameAlert,
     h('div', {}, h('button', { class: 'btn', type: 'submit' }, 'Запазете')));
   nameForm.addEventListener('submit', async (event) => {
@@ -1157,7 +1425,8 @@ function planCard() {
           h('td', { class: 'usage__bar' }, limit !== '' && h('span', { class: `meter ${ratio >= 1 ? 'meter--full' : ratio >= 0.8 ? 'meter--near' : ''}` },
             h('span', { style: `width:${Math.round(ratio * 100)}%` }))));
       }),
-      h('tr', {}, h('th', { scope: 'row' }, 'Лого в документите'), h('td', {}, data.plan.allowLogo === 'Да' ? 'включено' : 'не е включено'), h('td', {})))),
+      Object.entries(meta.features).map(([key, label]) => h('tr', {}, h('th', { scope: 'row' }, label[0].toUpperCase() + label.slice(1)),
+        h('td', {}, data.plan[key] === 'Да' ? 'включено' : 'не е включено'), h('td', {}))))),
     h('p', { class: 'small muted' }, 'За по-голям план пишете на ', h('a', { href: 'mailto:call@buladmin.eu' }, 'call@buladmin.eu'), '. Плановете се сменят от администраторите на БУЛАДМИН.'));
 }
 
@@ -1188,8 +1457,40 @@ function logoCard() {
       : h('p', { class: 'small muted' }, `Логото е платена възможност и не е включено в плана „${data.plan.name}“. В документите вместо него стои името на фирмата.`));
 }
 
+// Банковите сметки на фирмата. Броят им и сметките в други валути зависят от плана.
+function accountsEditor(initial) {
+  const max = data.plan.maxBankAccounts === '' ? Infinity : Number(data.plan.maxBankAccounts);
+  const currencies = data.plan.allowCurrencies === 'Да' ? meta.currencies : ['EUR'];
+  let rows = initial.length ? initial.map((a) => ({ ...a })) : [{ iban: '', bic: '', bank: '', currency: 'EUR', label: '' }];
+  const list = h('div', { class: 'stack-tight' });
+  const addButton = h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: () => { rows.push({ iban: '', bic: '', bank: '', currency: currencies[0], label: '' }); render(); } }, icon('plus', 16), 'Добавете сметка');
+  const render = () => {
+    fill(list, rows.map((row, i) => {
+      const input = (key, attrs) => h('input', { value: row[key] || '', oninput: (e) => { row[key] = e.target.value; }, ...attrs });
+      return h('div', { class: 'account-row' },
+        h('div', { class: 'field' }, h('label', {}, `Сметка ${i + 1}${i === 0 ? ' (основна)' : ''}`), input('iban', { placeholder: 'IBAN', 'aria-label': `IBAN ${i + 1}`, class: 'mono', maxlength: 40 })),
+        h('div', { class: 'account-row__grid' },
+          input('bic', { placeholder: 'BIC', 'aria-label': 'BIC', maxlength: 11 }),
+          input('bank', { placeholder: 'Банка', 'aria-label': 'Банка', maxlength: 120 }),
+          h('select', { 'aria-label': 'Валута', onchange: (e) => { row.currency = e.target.value; } }, currencies.map((c) => h('option', { value: c, selected: c === row.currency }, c))),
+          input('label', { placeholder: 'Етикет (по желание)', 'aria-label': 'Етикет', maxlength: 60 })),
+        rows.length > 1 && h('button', { class: 'icon-btn', type: 'button', title: 'Премахнете сметката', 'aria-label': `Премахнете сметка ${i + 1}`, onclick: () => { rows.splice(i, 1); render(); } }, icon('trash', 16)));
+    }));
+    addButton.hidden = rows.length >= max;
+  };
+  render();
+  return {
+    el: h('fieldset', { class: 'form-section', name: 'bankAccounts' },
+      h('legend', {}, 'Банкови сметки'),
+      h('p', { class: 'small muted' }, max === Infinity ? 'Изберете сметката за всяка фактура; по подразбиране е тази във валутата на документа.' : `Планът „${data.plan.name}“ позволява до ${max} ${max === 1 ? 'сметка' : 'сметки'}${data.plan.allowCurrencies === 'Да' ? '' : ' в евро'}.`),
+      list, h('div', {}, addButton)),
+    get: () => rows.filter((r) => r.iban.trim()).map((r) => ({ ...r, iban: r.iban.replace(/\s/g, '').toUpperCase() })),
+  };
+}
+
 function viewSettings() {
   const c = data.company;
+  const accounts = accountsEditor(c.bankAccounts || []);
   const alert = h('div', { 'aria-live': 'polite' });
   const f = (name, label, opts = {}) => field({ name, label, value: c[name], maxlength: name === 'address' ? 255 : 120, ...opts });
   const form = h('form', { class: 'form card', novalidate: true },
@@ -1200,20 +1501,21 @@ function viewSettings() {
       selectField({ name: 'vatRegistered', label: 'Регистрирана по ДДС', options: ['Да', 'Не'], value: c.vatRegistered }),
       f('vatNumber', 'ДДС номер', { placeholder: 'BG123456789' }), f('mol', 'МОЛ'),
       f('city', 'Населено място'), f('address', 'Адрес'),
-      f('phone', 'Телефон', { type: 'tel' }), f('email', 'Имейл', { type: 'email' }),
-      f('iban', 'IBAN'), f('bic', 'BIC'), f('bank', 'Банка', { wrapClass: 'full' })),
+      f('phone', 'Телефон', { type: 'tel' }), f('email', 'Имейл', { type: 'email', hint: 'на него идват отговорите на клиентите' })),
+    accounts.el,
     h('h2', {}, 'Номерация и срокове'),
     h('div', { class: 'form__grid' },
       f('invoiceStart', 'Начален номер на фактурите', { inputmode: 'numeric', hint: 'ако продължавате от друга програма' }),
       f('dueDays', 'Срок за плащане по подразбиране (дни)', { inputmode: 'numeric' })),
-    h('p', { class: 'small muted' }, 'Валута: EUR. Фактурите и кредитните известия са с обща поредица от 10 цифри. Офертите и проформите са с номер OF-/PF-година-пореден.'),
+    h('p', { class: 'small muted' }, `Основна валута: EUR${data.plan.allowCurrencies === 'Да' ? '; документите могат да са и в друга валута с курс на ЕЦБ' : ''}. Фактурите и кредитните известия са с обща поредица от 10 цифри. Офертите и проформите са с номер OF-/PF-година-пореден.`),
     alert,
     h('div', {}, h('button', { class: 'btn', type: 'submit' }, 'Запазете')));
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     alert.replaceChildren();
     try {
-      await api('/org/settings', { method: 'PUT', body: formValues(form) });
+      const { iban, bic, bank, currency, label, ...values } = formValues(form);
+      await api('/org/settings', { method: 'PUT', body: { ...values, bankAccounts: accounts.get() } });
       showFieldErrors(form, {});
       await refresh();
       me = await api('/me');
@@ -1456,7 +1758,7 @@ async function viewPlatformPlans() {
           field({ name: 'price', label: 'Цена на месец (EUR)', value: p.price === '' ? '' : String(p.price), inputmode: 'decimal', hint: 'за сведение' }),
           field({ name: 'sortOrder', label: 'Подредба', value: String(p.sortOrder ?? ''), inputmode: 'numeric' }),
           ...Object.entries(meta.limits).map(([key, { label }]) => field({ name: key, label: label[0].toUpperCase() + label.slice(1), value: p[key] === '' ? '' : String(p[key] ?? ''), inputmode: 'numeric', hint: 'празно = без ограничение' })),
-          selectField({ name: 'allowLogo', label: 'Лого в документите', options: ['Да', 'Не'], value: p.allowLogo }),
+          ...Object.entries(meta.features).map(([key, label]) => selectField({ name: key, label: label[0].toUpperCase() + label.slice(1), options: ['Да', 'Не'], value: p[key] || 'Не' })),
           selectField({ name: 'isActive', label: 'Предлага се', options: ['Да', 'Не'], value: p.isActive }),
           selectField({ name: 'isDefault', label: 'План при регистрация', options: ['Не', 'Да'], value: p.isDefault })),
       ],
@@ -1476,7 +1778,7 @@ async function viewPlatformPlans() {
       h('p', { class: 'small muted' }, `${p.id} · ${p.price === '' ? 'цена не е зададена' : money(p.price)} на месец · ${count(p.id)} активни организации`),
       p.description && h('p', { class: 'small' }, p.description),
       h('dl', { class: 'details' }, Object.entries(meta.limits).flatMap(([key, { label }]) => [h('dt', {}, label), h('dd', {}, p[key] === '' ? 'без ограничение' : String(p[key]))]),
-        h('dt', {}, 'лого'), h('dd', {}, p.allowLogo === 'Да' ? 'да' : 'не')),
+        Object.entries(meta.features).flatMap(([key, label]) => [h('dt', {}, label), h('dd', {}, p[key] === 'Да' ? 'да' : 'не')])),
       h('div', {}, h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: () => edit(p) }, icon('edit', 16), 'Промяна'))))));
 }
 
@@ -1574,6 +1876,8 @@ function nav() {
     data && { key: 'deals', href: '#/deals', label: 'Сделки', icon: 'handshake', match: /^\/deals/ },
     data && { key: 'activities', href: '#/activities', label: 'Задачи', icon: 'check', match: /^\/activities/ },
     data && { key: 'contacts', href: '#/contacts', label: 'Лица за контакт', icon: 'users', match: /^\/contacts/ },
+    data && sectionAllowed('tenders') && { group: 'Обществени поръчки' },
+    data && sectionAllowed('tenders') && { key: 'tenders', href: '#/tenders', label: 'ЦАИС ЕОП', icon: 'scale', match: /^\/tenders/ },
     data && { group: 'ERP' },
     data && { key: 'documents', href: '#/documents', label: 'Оферти и фактури', icon: 'doc', match: /^\/documents/ },
     data && { key: 'payments', href: '#/payments', label: 'Плащания', icon: 'wallet', match: /^\/payments/ },
@@ -1620,6 +1924,7 @@ async function route() {
     if (section === 'activities' && !id) return viewActivities();
     if (section === 'users' && isAdmin()) return viewUsers();
     if (section === 'settings' && isAdmin()) return viewSettings();
+    if (meta.entities[section]?.generic && !sectionAllowed(section)) return viewUpsell(section);
     if (meta.entities[section]?.generic) return id ? await viewRecord(section, id) : viewList(section, query);
     page(emptyState('alert', 'Страницата не е намерена', null, h('a', { class: 'btn', href: '#/' }, 'Към таблото')));
   } catch (err) {

@@ -108,15 +108,23 @@ for (const [key, def] of Object.entries(schema)) {
   }
 }
 
-// Плановете по подразбиране, ако таблицата е празна. След това се променят от системата („БУЛАДМИН“ → „Планове“).
-const { value: planItems } = await graph(`/sites/${site.id}/lists/${listIds.plans}/items?$top=1`);
-if (!planItems.length) {
-  for (const { id, ...plan } of DEFAULT_PLANS) {
+// Плановете по подразбиране, които още ги няма. След това се променят от системата („БУЛАДМИН“ → „Планове“).
+// При съществуващ план се попълват само новите възможности, ако още не са задавани — промените на администраторите остават.
+const NEW_PLAN_FIELDS = ['maxBankAccounts', 'maxEmails', 'allowCurrencies', 'allowProcurement'];
+const { value: planItems } = await graph(`/sites/${site.id}/lists/${listIds.plans}/items?expand=fields&$top=999`);
+for (const { id, ...plan } of DEFAULT_PLANS) {
+  const existingPlan = planItems.find((item) => item.fields.Title === id);
+  if (!existingPlan) {
     const fields = { Title: id };
     for (const [key, value] of Object.entries(plan)) if (value !== '') fields[key] = value;
     await graph(`/sites/${site.id}/lists/${listIds.plans}/items`, 'POST', { fields });
+    console.log(`  създаден план: ${plan.name}`);
+  } else if (NEW_PLAN_FIELDS.every((key) => existingPlan.fields[key] === undefined || existingPlan.fields[key] === null)) {
+    const fields = {};
+    for (const key of NEW_PLAN_FIELDS) if (plan[key] !== '') fields[key] = plan[key];
+    await graph(`/sites/${site.id}/lists/${listIds.plans}/items/${existingPlan.id}/fields`, 'PATCH', fields);
+    console.log(`  нови възможности в план „${existingPlan.fields.name}“: ${Object.entries(fields).map(([k, v]) => `${k}=${v}`).join(', ')}`);
   }
-  console.log(`  създадени планове: ${DEFAULT_PLANS.map((p) => p.name).join(', ')}`);
 }
 
 const PLATFORM_ADMIN = 'Администратор на БУЛАДМИН';

@@ -66,9 +66,14 @@ const parse = (iso) => {
 export const formatDate = (iso) => { const d = parse(iso); return d ? dateFormat.format(d) : ''; };
 export const formatTime = (iso) => { const d = parse(iso); return d ? timeFormat.format(d) : ''; };
 
-const moneyFormat = new Intl.NumberFormat('bg-BG', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const moneyFormats = new Map();
+const moneyFormat = (currency) => {
+  // Евро е със знака €, а другите валути — с кода си (USD, GBP), както е прието във фактурите.
+  if (!moneyFormats.has(currency)) moneyFormats.set(currency, new Intl.NumberFormat('bg-BG', { style: 'currency', currency, currencyDisplay: currency === 'EUR' ? 'symbol' : 'code', minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  return moneyFormats.get(currency);
+};
 const numberFormat = new Intl.NumberFormat('bg-BG', { maximumFractionDigits: 3 });
-export const money = (n) => (n === '' || n === null || n === undefined || Number.isNaN(Number(n)) ? '' : moneyFormat.format(Number(n)));
+export const money = (n, currency = 'EUR') => (n === '' || n === null || n === undefined || Number.isNaN(Number(n)) ? '' : moneyFormat(currency || 'EUR').format(Number(n)));
 export const num = (n) => (n === '' || n === null || n === undefined ? '' : numberFormat.format(Number(n)));
 export const parseNum = (value) => {
   const n = Number(String(value ?? '').replace(/\s/g, '').replace(',', '.'));
@@ -172,6 +177,9 @@ const ICONS = {
   send: 'M22 2L11 13M22 2l-7 20-4-9-9-4z',
   list: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
   board: 'M3 3h7v18H3zM14 3h7v10h-7z',
+  scale: 'M12 3v18M7 21h10M5 7h14M5 7l-3 7a3.5 3.5 0 0 0 6 0zM19 7l-3 7a3.5 3.5 0 0 0 6 0z',
+  bell: 'M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0',
+  link: 'M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7',
   arrow: 'M5 12h14M13 6l6 6-6 6',
 };
 

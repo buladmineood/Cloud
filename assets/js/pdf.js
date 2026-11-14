@@ -40,10 +40,16 @@ function loadLibs() {
 
 // Интервалите от Intl (неразделящи) се заменят с обикновени, за да се изписват с всеки шрифт.
 const plain = (s) => String(s ?? '').replace(/[  ]/g, ' ');
-const moneyFormat = new Intl.NumberFormat('bg-BG', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const moneyFormats = new Map();
+const moneyFormat = (currency) => {
+  // Евро е със знака €, а другите валути — с кода си (USD, GBP), както е прието във фактурите.
+  if (!moneyFormats.has(currency)) moneyFormats.set(currency, new Intl.NumberFormat('bg-BG', { style: 'currency', currency, currencyDisplay: currency === 'EUR' ? 'symbol' : 'code', minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  return moneyFormats.get(currency);
+};
 const numFormat = new Intl.NumberFormat('bg-BG', { maximumFractionDigits: 3 });
-const money = (n) => plain(moneyFormat.format(Number(n) || 0));
+const money = (n, currency = 'EUR') => plain(moneyFormat(currency).format(Number(n) || 0));
 const num = (n) => plain(numFormat.format(Number(n) || 0));
+const rateNum = new Intl.NumberFormat('bg-BG', { minimumFractionDigits: 4, maximumFractionDigits: 6 });
 const date = (iso) => (iso ? iso.split('-').reverse().join('.') : '');
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const lineNet = (l) => round2(l.qty * l.price * (1 - (l.discount || 0) / 100));
@@ -67,6 +73,7 @@ const partyLines = (p) => [
  * logo: { bytes, type } или null; related: свързаният документ (за кредитно известие).
  */
 export async function buildPdf({ doc, seller, buyer, logo, related, issuedBy }) {
+  const cur = doc.currency || 'EUR';
   const { PDFLib, fontkit, regular, bold } = await loadLibs();
   const { PDFDocument, rgb } = PDFLib;
   const color = (c) => rgb(c[0] / 255, c[1] / 255, c[2] / 255);
@@ -186,7 +193,7 @@ export async function buildPdf({ doc, seller, buyer, logo, related, issuedBy }) 
       newPage();
       tableHeader();
     }
-    const cells = [String(index + 1), null, num(l.qty), l.unit, money(l.price), l.discount ? `${num(l.discount)}%` : '', `${l.vatRate}%`, money(lineNet(l))];
+    const cells = [String(index + 1), null, num(l.qty), l.unit, money(l.price, cur), l.discount ? `${num(l.discount)}%` : '', `${l.vatRate}%`, money(lineNet(l), cur)];
     cells.forEach((value, i) => {
       if (i === 1) nameLines.forEach((t, j) => draw(t, colX[1] + 4, y - 10 - j * 11, { size: 8.5 }));
       else if (value) draw(value, cols[i].right ? colX[i] + cols[i].w - 4 : colX[i] + 4, y - 10, { size: 8.5, align: cols[i].right ? 'right' : 'left' });
@@ -198,7 +205,15 @@ export async function buildPdf({ doc, seller, buyer, logo, related, issuedBy }) 
 
   // Суми вдясно, плащане и бележки вляво.
   const t = totalsOf(doc.lines, doc.docType);
-  const totalRows = t.byRate.flatMap((r) => [[`Данъчна основа ${r.rate}%`, money(r.base)], [`ДДС ${r.rate}%`, money(r.vat)]]);
+  const totalRows = t.byRate.flatMap((r) => [[`Данъчна основа ${r.rate}%`, money(r.base, cur)], [`ДДС ${r.rate}%`, money(r.vat, cur)]]);
+  // При чужда валута данъчната основа и ДДС се посочват и в евро по курса на документа.
+  const rate = Number(doc.exchangeRate) || 1;
+  const eur = (n) => round2(n / rate);
+  const eurRows = cur === 'EUR' ? [] : [
+    [`Курс: 1 EUR = ${rateNum.format(rate)} ${cur}${doc.rateDate ? ` (ЕЦБ, ${date(doc.rateDate)})` : ''}`, ''],
+    ...t.byRate.flatMap((r) => [[`Данъчна основа ${r.rate}% в EUR`, money(eur(r.base))], [`ДДС ${r.rate}% в EUR`, money(eur(r.vat))]]),
+    ['Общо в EUR', money(eur(t.total))],
+  ];
   const leftLines = [
     [`Начин на плащане: ${doc.paymentMethod || '—'}`, true],
     doc.paymentMethod === 'Банков превод' && seller.iban && [`IBAN: ${seller.iban}${seller.bic ? ` · BIC: ${seller.bic}` : ''}${seller.bank ? ` · ${seller.bank}` : ''}`],
@@ -206,7 +221,7 @@ export async function buildPdf({ doc, seller, buyer, logo, related, issuedBy }) 
     doc.notes && [doc.notes],
     [`Съставил: ${issuedBy || ''}`],
   ].filter(Boolean).flatMap(([text, strong]) => wrap(text, 270, 8.5, strong ? fontBold : font).map((line) => [line, strong]));
-  const blockH = Math.max(totalRows.length * 13 + 28, leftLines.length * 12);
+  const blockH = Math.max(totalRows.length * 13 + 28 + eurRows.length * 12 + (eurRows.length ? 10 : 0), leftLines.length * 12);
   if (y - blockH < 70) newPage();
   totalRows.forEach(([label, value], i) => {
     draw(label, A4[0] - M - 110, y - 10 - i * 13, { size: 8.5, c: INK2, align: 'right' });
@@ -215,7 +230,12 @@ export async function buildPdf({ doc, seller, buyer, logo, related, issuedBy }) 
   const grandY = y - 10 - totalRows.length * 13 - 8;
   page.drawLine({ start: { x: A4[0] - M - 210, y: grandY + 12 }, end: { x: A4[0] - M, y: grandY + 12 }, thickness: 1.2, color: color(NAVY) });
   draw('Сума за плащане', A4[0] - M - 110, grandY, { size: 10, f: fontBold, align: 'right' });
-  draw(money(t.total), A4[0] - M, grandY, { size: 11, f: fontBold, align: 'right' });
+  draw(money(t.total, cur), A4[0] - M, grandY, { size: 11, f: fontBold, align: 'right' });
+  eurRows.forEach(([label, value], i) => {
+    const yy = grandY - 18 - i * 12;
+    draw(label, A4[0] - M - (value ? 110 : 0), yy, { size: 8, c: INK2, align: 'right' });
+    if (value) draw(value, A4[0] - M, yy, { size: 8.5, c: INK2, align: 'right' });
+  });
   leftLines.forEach(([line, strong], i) => draw(line, M, y - 10 - i * 12, { size: 8.5, f: strong ? fontBold : font }));
 
   // Долен колонтитул на всяка страница: с коя система е създаден документът и номер на страницата.

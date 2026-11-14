@@ -2,13 +2,16 @@ import {
   b64url, hashPassword, randomCode, randomToken, safeEqual, sha256, signToken, verifyPassword, verifyToken,
 } from './crypto.js';
 import {
-  addDays, computeTotals, DEFAULT_COMPANY, DOC_TYPES, nextNumber, parseJson, paymentStatusOf, TAX_DOCS, validateLines,
+  addDays, computeTotals, CURRENCIES, DEFAULT_COMPANY, DOC_TYPES, nextNumber, parseJson, paymentStatusOf, TAX_DOCS, validateBankAccounts,
+  validateLines,
 } from './documents.js';
 import { renderEmail } from './email.js';
 import { beginLogin, completeLogin, isProvider } from './oauth.js';
 import {
-  DEFAULT_PLANS, defaultPlan, DOC_LIMIT, effectivePlan, ENTITY_LIMIT, LIMITS, limitOf, paidPlans, paymentDue, PLAN_NUMBERS, usageOf,
+  DEFAULT_PLANS, defaultPlan, DOC_LIMIT, effectivePlan, EMAIL_ACTION, ENTITY_LIMIT, FEATURES, hasFeature, LIMITS, limitOf, paidPlans, paymentDue,
+  PLAN_NUMBERS, usageOf,
 } from './plans.js';
+import { CHECKLIST_STATES, defaultChecklist, OPEN_TENDER_STAGES, validateChecklist } from './procurement.js';
 import schema from './schema.json' with { type: 'json' };
 import {
   clean, isValidDay, isValidEik, isValidEmail, MAX_MULTILINE, MAX_TEXT, parseNumber, passwordError, round2, validateRecord,
@@ -33,6 +36,10 @@ const ADMIN = 'Администратор';
 const VIEWER = 'Наблюдател';
 const PLATFORM_ADMIN = 'Администратор на БУЛАДМИН';
 const ORG_HEADER = 'x-org';
+const MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024;
+const MAX_RECIPIENTS = 5;
+const SENDABLE = ['Издаден', 'Приета', 'Отказана'];
+const PLAN_FEATURES = Object.keys(FEATURES);
 
 const GENERIC = Object.keys(schema).filter((key) => schema[key].generic);
 const LABELS = Object.fromEntries(
@@ -97,12 +104,19 @@ const publicUser = (u) => ({
   emailVerified: !u.verifyTokenHash || !!u.emailVerifiedAt,
   lastLoginAt: u.lastLoginAt || '',
   createdAt: u.createdAt || '',
+  notifyEmail: u.notifyEmail !== 'Не',
 });
 
+// Сумите са във валутата на документа; полетата *Eur са равностойността в евро по курса на документа.
 function publicDocument(d) {
-  const { orgId, ...rest } = d;
+  const { orgId, publicTokenHash, ...rest } = d;
+  const currency = d.currency || 'EUR';
+  const rate = currency === 'EUR' ? 1 : Number(d.exchangeRate) || 1;
+  const eur = (n) => round2((Number(n) || 0) / rate);
   return {
     ...rest,
+    currency,
+    exchangeRate: currency === 'EUR' ? 1 : rate,
     lines: parseJson(d.lines, []),
     buyer: parseJson(d.buyer, null),
     seller: parseJson(d.seller, null),
@@ -110,6 +124,11 @@ function publicDocument(d) {
     vatAmount: Number(d.vatAmount) || 0,
     total: Number(d.total) || 0,
     paidAmount: Number(d.paidAmount) || 0,
+    subtotalEur: eur(d.subtotal),
+    vatAmountEur: eur(d.vatAmount),
+    totalEur: eur(d.total),
+    paidAmountEur: eur(d.paidAmount),
+    hasLink: !!publicTokenHash,
   };
 }
 
@@ -120,13 +139,38 @@ function publicRecord(entity, r) {
   return out;
 }
 
+const publicTender = (t) => ({ ...t, checklist: Array.isArray(t.checklist) ? t.checklist : parseJson(t.checklist, []) });
+
 function publicPlan(p) {
   const out = { ...p };
   for (const key of PLAN_NUMBERS) out[key] = toNumber(p[key]);
   return out;
 }
 
-const companyOf = (org) => Object.fromEntries(COMPANY_FIELDS.map((k) => [k, org[k] ?? DEFAULT_COMPANY[k]]));
+const SOFIA_TIME = new Intl.DateTimeFormat('bg-BG', {
+  timeZone: 'Europe/Sofia', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+});
+const formatSofia = (iso) => (iso ? SOFIA_TIME.format(new Date(iso)).replace(/ | /g, ' ') : '');
+const formatDay = (day) => (day ? day.split('-').reverse().join('.') : '');
+const money = (n, currency = 'EUR') => `${(Number(n) || 0).toFixed(2).replace('.', ',')} ${currency}`;
+
+// Банковите сметки на фирмата. По-старите записи имат само една сметка в полетата iban/bic/bank.
+function bankAccountsOf(org) {
+  const list = parseJson(org.bankAccounts, null);
+  if (Array.isArray(list)) return list;
+  return org.iban ? [{ iban: org.iban, bic: org.bic || '', bank: org.bank || '', currency: 'EUR', label: '' }] : [];
+}
+
+function sellerWithAccount(company, iban) {
+  const account = company.bankAccounts.find((a) => a.iban === iban) || company.bankAccounts[0];
+  const { bankAccounts, ...seller } = company;
+  return account ? { ...seller, iban: account.iban, bic: account.bic, bank: account.bank } : seller;
+}
+
+const companyOf = (org) => ({
+  ...Object.fromEntries(COMPANY_FIELDS.map((k) => [k, org[k] ?? DEFAULT_COMPANY[k]])),
+  bankAccounts: bankAccountsOf(org),
+});
 
 function paymentMessage(org, plan) {
   const price = plan.price === '' || plan.price === undefined ? '' : ` (${Number(plan.price).toFixed(2)} € на месец)`;
@@ -142,15 +186,25 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Sofia' }).format(now());
   const mailEnabled = env.MAIL_ENABLED === 'true';
 
-  async function sendMail(to, subject, message) {
-    if (!mailEnabled || !to) return false;
+  async function sendMail(to, subject, message, extra) {
+    if (!mailEnabled || !to || (Array.isArray(to) && !to.length)) return false;
     try {
-      await store.sendMail(env.MAIL_FROM, to, subject, renderEmail({ origin: env.APP_ORIGIN, preheader: subject, ...message }));
+      await store.sendMail(env.MAIL_FROM, to, subject, renderEmail({ origin: env.APP_ORIGIN, preheader: subject, ...message }), extra);
       return true;
     } catch (err) {
       console.error('mail failed', err.message);
       return false;
     }
+  }
+
+  // Известие до потребител на системата, освен ако не ги е изключил от профила си.
+  async function notifyUser(userId, subject, message) {
+    const [user] = userId ? await store.find('users', 'id', userId) : [];
+    if (!user || user.isActive !== 'Да' || user.notifyEmail === 'Не') return false;
+    return sendMail(user.id, subject, {
+      ...message,
+      note: [message.note, 'Известията се изключват от „Профил“ в BulAdmin Cloud.'].filter(Boolean).join(' '),
+    });
   }
 
   async function rateLimit(request, bucket) {
@@ -250,10 +304,19 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   }
 
   async function orgUsage(orgId) {
-    const [members, companies, contacts, products, deals, documents] = await Promise.all(
-      ['members', 'companies', 'contacts', 'products', 'deals', 'documents'].map((t) => store.find(t, 'orgId', orgId)),
+    const [members, companies, contacts, products, deals, documents, auditRows, orgs] = await Promise.all(
+      ['members', 'companies', 'contacts', 'products', 'deals', 'documents', 'audit'].map((t) => store.find(t, 'orgId', orgId))
+        .concat(store.find('orgs', 'id', orgId)),
     );
-    return usageOf({ members, companies, contacts, products, deals, documents }, today().slice(0, 7));
+    return usageOf({
+      members, companies, contacts, products, deals, documents, audit: auditRows, bankAccounts: orgs[0] ? bankAccountsOf(orgs[0]) : [],
+    }, today().slice(0, 7));
+  }
+
+  function requireFeature(ctx, feature) {
+    if (!hasFeature(ctx.plan, feature)) {
+      throw new HttpError(402, `${FEATURES[feature][0].toUpperCase()}${FEATURES[feature].slice(1)} не е включено в плана „${ctx.plan.name}“. Свържете се с БУЛАДМИН за по-голям план.`);
+    }
   }
 
   async function assertLimit(ctx, key, extra = 1) {
@@ -578,7 +641,9 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const body = await readBody(request);
     const fullName = clean(body.fullName, 120);
     if (!fullName) throw new HttpError(422, 'Въведете име.', { fullName: 'Въведете име.' });
-    await store.update('users', user.id, { fullName, jobTitle: clean(body.jobTitle, 120) });
+    const patch = { fullName, jobTitle: clean(body.jobTitle, 120) };
+    if (body.notifyEmail !== undefined) patch.notifyEmail = body.notifyEmail === false || body.notifyEmail === 'Не' ? 'Не' : 'Да';
+    await store.update('users', user.id, patch);
     return json({ ok: true });
   }
 
@@ -608,24 +673,32 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
         single: def.single,
         display: def.display,
         generic: !!def.generic,
+        feature: def.feature || '',
         columns: def.columns.filter((c) => !c.hidden).map(({ indexed, ...c }) => c),
       }]));
-    return json({ entities, roles: ROLES, docTypes: DOC_TYPES, mailEnabled, limits: LIMITS });
+    return json({
+      entities, roles: ROLES, docTypes: DOC_TYPES, mailEnabled, limits: LIMITS, features: FEATURES, currencies: CURRENCIES,
+      checklistStates: CHECKLIST_STATES,
+    });
   }
 
   // --- Всички данни на организацията наведнъж: таблиците са малки, а интерфейсът филтрира на място ---
 
   async function bootstrap(request) {
     const ctx = await orgContext(request);
+    // Разделите, които планът не включва (напр. обществени поръчки), се връщат празни.
     const entities = [...GENERIC, 'documents', 'payments'];
-    const [lists, members] = await Promise.all([
-      Promise.all(entities.map((e) => store.find(e, 'orgId', ctx.org.id))),
+    const allowed = (e) => !schema[e].feature || hasFeature(ctx.plan, schema[e].feature);
+    const [lists, members, auditRows] = await Promise.all([
+      Promise.all(entities.map((e) => (allowed(e) ? store.find(e, 'orgId', ctx.org.id) : []))),
       store.find('members', 'orgId', ctx.org.id),
+      store.find('audit', 'orgId', ctx.org.id),
     ]);
     const data = {};
     entities.forEach((entity, i) => {
       data[entity] = entity === 'documents' ? lists[i].map(publicDocument) : lists[i].map((r) => publicRecord(entity, r));
     });
+    data.tenders = data.tenders.map(publicTender);
     const users = await Promise.all(members.map((m) => store.find('users', 'id', m.userId).then(([u]) => u)));
     data.users = members.map((m, i) => users[i] && ({
       ...publicUser(users[i]), role: m.role, isActive: m.isActive === 'Да' && users[i].isActive === 'Да' ? 'Да' : 'Не',
@@ -635,7 +708,9 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       id: ctx.org.id, name: ctx.org.name, status: ctx.org.orgStatus, hasLogo: !!ctx.org.logoItemId, planUntil: ctx.org.planUntil || '',
     };
     data.plan = publicPlan(ctx.plan);
-    data.usage = usageOf({ members, ...Object.fromEntries(entities.map((e, i) => [e, lists[i]])) }, today().slice(0, 7));
+    data.usage = usageOf({
+      members, ...Object.fromEntries(entities.map((e, i) => [e, lists[i]])), audit: auditRows, bankAccounts: bankAccountsOf(ctx.org),
+    }, today().slice(0, 7));
     data.role = ctx.role;
     data.viaPlatform = ctx.platform;
     return json(data);
@@ -678,8 +753,28 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     return extra;
   }
 
+  // Кой е отговорен за записа: на него отива известие, когато друг му го възложи.
+  const ASSIGNEE = { activities: 'assignedTo', tenders: 'owner', deals: 'owner' };
+
+  async function notifyAssignment(ctx, entity, record) {
+    const field = ASSIGNEE[entity];
+    const to = record[field];
+    if (!to || to === ctx.user.id) return;
+    const title = record[[schema[entity].display].flat()[0]] || record.id;
+    const details = [[schema[entity].single, title], ['Възложи', ctx.user.fullName || ctx.user.id], ['Фирма', ctx.org.name]];
+    if (record.dueDate) details.push(['Срок', record.dueDate.split('-').reverse().join('.')]);
+    if (record.submissionDeadline) details.push(['Срок за подаване', formatSofia(record.submissionDeadline)]);
+    await notifyUser(to, `${schema[entity].single}: ${title}`, {
+      title: `Възложена Ви е ${schema[entity].single.toLowerCase()}`,
+      paragraphs: [`${ctx.user.fullName || ctx.user.id} Ви възложи „${title}“ в „${ctx.org.name}“.`],
+      details,
+      action: { label: 'Отворете', url: `${env.APP_ORIGIN}/app.html#/${entity}/${record.id}` },
+    });
+  }
+
   async function createGeneric(request, entity) {
     const ctx = await orgContext(request, { role: 'editor' });
+    if (schema[entity].feature) requireFeature(ctx, schema[entity].feature);
     const { values, errors } = validateRecord(entity, await readBody(request));
     await checkRefs(ctx, entity, values, errors);
     failIfErrors(errors);
@@ -697,14 +792,18 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       ...(schema[entity].columns.some((c) => c.name === 'createdBy') && { createdBy: ctx.user.id }),
     };
     if (entity === 'activities' && !record.assignedTo) record.assignedTo = ctx.user.id;
-    if (['companies', 'deals'].includes(entity) && !record.owner) record.owner = ctx.user.id;
+    if (['companies', 'deals', 'tenders'].includes(entity) && !record.owner) record.owner = ctx.user.id;
+    if (entity === 'tenders') record.checklist = JSON.stringify(defaultChecklist());
     await store.create(entity, record);
     await audit(ctx, entity, record.id, 'Създаване');
-    return json(publicRecord(entity, record), 201);
+    await notifyAssignment(ctx, entity, record);
+    const out = publicRecord(entity, record);
+    return json(entity === 'tenders' ? publicTender(out) : out, 201);
   }
 
   async function updateGeneric(request, entity, id) {
     const ctx = await orgContext(request, { role: 'editor' });
+    if (schema[entity].feature) requireFeature(ctx, schema[entity].feature);
     const before = await getRecord(entity, id, ctx.org.id);
     const { values, errors } = validateRecord(entity, await readBody(request), { partial: true });
     await checkRefs(ctx, entity, values, errors);
@@ -716,7 +815,25 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const patch = { ...values, ...derived(entity, values, before), updatedAt: nowIso() };
     await store.update(entity, id, patch);
     await audit(ctx, entity, id, 'Промяна', changed.join(', '));
-    return json(publicRecord(entity, { ...before, ...patch }));
+    const after = { ...before, ...patch };
+    const field = ASSIGNEE[entity];
+    if (field && values[field] && values[field] !== before[field]) await notifyAssignment(ctx, entity, after);
+    const out = publicRecord(entity, after);
+    return json(entity === 'tenders' ? publicTender(out) : out);
+  }
+
+  // Списъкът с документи за участие в обществена поръчка.
+  async function saveChecklist(request, id) {
+    const ctx = await orgContext(request, { role: 'editor' });
+    requireFeature(ctx, 'allowProcurement');
+    const tender = await getRecord('tenders', id, ctx.org.id);
+    const { items, error } = validateChecklist((await readBody(request)).items);
+    if (error) throw new HttpError(422, error);
+    await store.update('tenders', id, { checklist: JSON.stringify(items), updatedAt: nowIso() });
+    const ready = items.filter((i) => i.state === 'Готов').length;
+    const needed = items.filter((i) => i.state !== 'Неприложим').length;
+    await audit(ctx, 'tenders', id, 'Документи', `готови ${ready} от ${needed}`);
+    return json(publicTender(publicRecord('tenders', { ...tender, checklist: items })));
   }
 
   async function deleteGeneric(request, entity, id) {
@@ -760,7 +877,28 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (values.paymentMethod && !methods.includes(values.paymentMethod)) errors.paymentMethod = 'Изберете от списъка.';
     values.vatExemptReason = clean(body.vatExemptReason, MAX_TEXT);
     values.notes = clean(body.notes, MAX_MULTILINE, { multiline: true });
-    values.currency = 'EUR';
+
+    // Валута: евро винаги; друга валута само при план с тази възможност и с курс към еврото.
+    values.currency = clean(body.currency, 3).toUpperCase() || 'EUR';
+    if (!CURRENCIES.includes(values.currency)) errors.currency = 'Невалидна валута.';
+    else if (values.currency !== 'EUR' && !hasFeature(ctx.plan, 'allowCurrencies')) {
+      errors.currency = `Документи в други валути не са включени в плана „${ctx.plan.name}“.`;
+    }
+    if (values.currency === 'EUR') {
+      values.exchangeRate = '';
+      values.rateDate = '';
+    } else {
+      const rate = parseNumber(body.exchangeRate);
+      if (!(rate > 0) || rate > 1e6) errors.exchangeRate = 'Въведете курс: колко единици от валутата струва 1 EUR.';
+      else values.exchangeRate = Math.round(rate * 1e6) / 1e6;
+      values.rateDate = clean(body.rateDate, 10);
+      if (values.rateDate && !isValidDay(values.rateDate)) errors.rateDate = 'Невалидна дата.';
+    }
+    // Сметката, по която да се плати: една от сметките на фирмата.
+    const accounts = bankAccountsOf(ctx.org);
+    values.bankAccount = clean(body.bankAccount, 40).replace(/\s/g, '').toUpperCase();
+    if (values.bankAccount && !accounts.some((a) => a.iban === values.bankAccount)) errors.bankAccount = 'Изберете сметка от настройките на фирмата.';
+    if (!values.bankAccount) values.bankAccount = (accounts.find((a) => a.currency === values.currency) || accounts[0])?.iban || '';
 
     if (lines) {
       const totals = computeTotals(lines, docType);
@@ -897,7 +1035,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       buyer: JSON.stringify({
         name: buyer.name, eik: buyer.eik, vatNumber: buyer.vatNumber, mol: buyer.mol, city: buyer.city, address: buyer.address,
       }),
-      seller: JSON.stringify(company),
+      // Доставчикът към момента на издаване, с избраната банкова сметка.
+      seller: JSON.stringify(sellerWithAccount(company, doc.bankAccount)),
       issuedBy: ctx.user.fullName || ctx.user.id,
       issuedAt: nowIso(),
       updatedAt: nowIso(),
@@ -962,7 +1101,10 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       dealId: source.dealId,
       relatedId: source.id,
       lines: source.lines,
-      currency: 'EUR',
+      currency: source.currency || 'EUR',
+      exchangeRate: source.exchangeRate,
+      rateDate: source.rateDate,
+      bankAccount: source.bankAccount,
       subtotal: totals.subtotal,
       vatAmount: totals.vatAmount,
       total: totals.total,
@@ -981,6 +1123,172 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     }
     await audit(ctx, 'documents', record.id, `Създадена чернова от ${source.docType} № ${source.number}`);
     return json(publicDocument(record), 201);
+  }
+
+  // --- Курсове на ЕЦБ ---
+
+  // Референтният курс на ЕЦБ: колко единици от валутата струва 1 EUR към дадена дата (последният публикуван до нея).
+  async function ecbRate(request, url) {
+    await orgContext(request);
+    const currency = clean(url.searchParams.get('currency'), 3).toUpperCase();
+    const date = clean(url.searchParams.get('date'), 10) || today();
+    if (!CURRENCIES.includes(currency) || currency === 'EUR') throw new HttpError(422, 'Невалидна валута.');
+    if (!isValidDay(date)) throw new HttpError(422, 'Невалидна дата.');
+    const api = `https://data-api.ecb.europa.eu/service/data/EXR/D.${currency}.EUR.SP00.A?endPeriod=${date}&lastNObservations=1&format=jsondata`;
+    let res;
+    try {
+      res = await fetchImpl(api, { headers: { accept: 'application/json' } });
+    } catch {
+      throw new HttpError(502, 'ЕЦБ не отговаря. Въведете курса ръчно.');
+    }
+    if (!res.ok) throw new HttpError(502, 'Няма курс на ЕЦБ за тази валута и дата. Въведете го ръчно.');
+    const data = await res.json();
+    const series = Object.values(data?.dataSets?.[0]?.series || {})[0];
+    const [index, values] = Object.entries(series?.observations || {}).pop() || [];
+    const rate = values?.[0];
+    const rateDate = data?.structure?.dimensions?.observation?.[0]?.values?.[Number(index)]?.id;
+    if (!(rate > 0)) throw new HttpError(502, 'Няма курс на ЕЦБ за тази валута и дата. Въведете го ръчно.');
+    return json({ currency, rate, rateDate: rateDate || date, source: 'ЕЦБ' });
+  }
+
+  // --- Изпращане на документи до контрагенти ---
+
+  const docTitle = (doc) => `${doc.docType} № ${doc.number}`;
+  const offerLink = (token) => `${env.APP_ORIGIN}/offer.html#t=${token}`;
+
+  function parseRecipients(value, field, errors) {
+    const list = [value].flat().join(',').split(/[,;\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+    if (list.some((e) => !isValidEmail(e))) errors[field] = 'Невалиден имейл.';
+    if (list.length > MAX_RECIPIENTS) errors[field] = `До ${MAX_RECIPIENTS} адреса.`;
+    return [...new Set(list)];
+  }
+
+  // PDF се създава в браузъра и идва тук само за да се прикачи към имейла; не се пази никъде.
+  async function sendDocument(request, id) {
+    const ctx = await orgContext(request, { role: 'editor' });
+    if (!mailEnabled) throw new HttpError(503, 'Имейлите са изключени в системата.');
+    const doc = await getRecord('documents', id, ctx.org.id);
+    if (!SENDABLE.includes(doc.docStatus)) throw new HttpError(409, 'Изпраща се само издаден документ.');
+    const body = await readBody(request);
+    const errors = {};
+    const to = parseRecipients(body.to, 'to', errors);
+    const cc = parseRecipients(body.cc || [], 'cc', errors);
+    if (!to.length) errors.to = 'Въведете поне един имейл.';
+    const subject = clean(body.subject, 200) || `${docTitle(doc)} от ${ctx.org.name}`;
+    const message = clean(body.message, 4000, { multiline: true });
+    let pdf;
+    try {
+      const b64 = String(body.pdf || '');
+      pdf = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    } catch {
+      pdf = new Uint8Array(0);
+    }
+    if (pdf.length > MAX_ATTACHMENT_BYTES) errors.pdf = 'PDF е твърде голям.';
+    else if (new TextDecoder().decode(pdf.slice(0, 5)) !== '%PDF-') errors.pdf = 'Липсва PDF на документа.';
+    failIfErrors(errors);
+    await assertLimit(ctx, 'maxEmails');
+
+    // При оферта клиентът получава линк, през който да я приеме или откаже, без да влиза в системата.
+    const patch = { sentAt: nowIso(), sentTo: [...to, ...cc].join(', ').slice(0, 255), updatedAt: nowIso() };
+    let link = '';
+    if (doc.docType === 'Оферта' && doc.docStatus === 'Издаден') {
+      const token = `${doc.id}.${randomToken(24)}`;
+      patch.publicTokenHash = await hashToken(token);
+      link = offerLink(token);
+    }
+    const company = companyOf(ctx.org);
+    const replyTo = company.email || ctx.user.id;
+    const currency = doc.currency || 'EUR';
+    const details = [
+      ['Документ', docTitle(doc)],
+      ['Дата', formatDay(doc.issueDate)],
+      ['Сума', money(doc.total, currency)],
+      doc.dueDate && [doc.docType === 'Оферта' ? 'Валидна до' : 'Падеж', formatDay(doc.dueDate)],
+    ].filter(Boolean);
+    const sent = await sendMail(to, subject, {
+      title: `${docTitle(doc)} от ${ctx.org.name}`,
+      paragraphs: [
+        ...(message ? message.split(/\n{2,}/) : [`Здравейте, изпращаме Ви ${doc.docType.toLowerCase()} № ${doc.number}. Документът е прикачен като PDF.`]),
+        link ? 'Можете да прегледате офертата и да я приемете или откажете от бутона по-долу.' : '',
+      ].filter(Boolean),
+      details,
+      action: link ? { label: 'Прегледайте и отговорете', url: link } : undefined,
+      footer: `Изпратено от ${ctx.org.name} чрез BulAdmin Cloud. За въпроси отговорете на този имейл — отговорът отива до ${replyTo}.`,
+    }, {
+      cc,
+      replyTo,
+      attachments: [{ name: `${doc.docType} ${doc.number}.pdf`, contentType: 'application/pdf', bytes: pdf }],
+    });
+    if (!sent) throw new HttpError(502, 'Имейлът не беше изпратен. Опитайте отново след малко.');
+    await store.update('documents', id, patch);
+    await audit(ctx, 'documents', id, EMAIL_ACTION, [...to, ...cc].join(', '));
+    return json(publicDocument({ ...doc, ...patch }));
+  }
+
+  // --- Оферта през линк: клиентът я вижда и отговаря без вход ---
+
+  async function offerByToken(token) {
+    const docId = String(token || '').split('.')[0];
+    if (!/^DOC-[\w]{4,20}$/.test(docId)) return null;
+    const [doc] = await store.find('documents', 'id', docId);
+    if (!doc?.publicTokenHash || !safeEqual(doc.publicTokenHash, await hashToken(String(token)))) return null;
+    if (doc.docType !== 'Оферта' || doc.docStatus === 'Анулиран') return null;
+    const [org] = await store.find('orgs', 'id', doc.orgId);
+    if (!org || org.orgStatus === 'Спряна') return null;
+    return { doc, org };
+  }
+
+  async function publicOffer(request) {
+    const { token } = await readBody(request);
+    const found = await offerByToken(token);
+    if (!found) throw new HttpError(404, 'Линкът не е валиден или офертата вече не е достъпна.');
+    const { doc, org } = found;
+    const plan = effectivePlan(org, await loadPlans(), today());
+    let logo = null;
+    if (org.logoItemId && hasFeature(plan, 'allowLogo')) {
+      try {
+        const bytes = await store.downloadFile(org.logoItemId);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        logo = { type: org.logoType || 'image/png', base64: btoa(binary) };
+      } catch { /* документът е валиден и без лого */ }
+    }
+    const { createdBy, issuedBy, ...pub } = publicDocument(doc);
+    return json({
+      offer: { ...pub, issuedBy, expired: !!doc.dueDate && doc.dueDate < today() },
+      org: { name: org.name, email: org.email || '', phone: org.phone || '' },
+      logo,
+    });
+  }
+
+  async function offerDecision(request) {
+    const body = await readBody(request);
+    const found = await offerByToken(body.token);
+    if (!found) throw new HttpError(404, 'Линкът не е валиден или офертата вече не е достъпна.');
+    const { doc, org } = found;
+    if (doc.docStatus !== 'Издаден') throw new HttpError(409, `Офертата вече е ${doc.docStatus.toLowerCase()}.`);
+    if (doc.dueDate && doc.dueDate < today()) throw new HttpError(409, 'Срокът на валидност на офертата е изтекъл. Свържете се с изпращача за нова оферта.');
+    const accept = body.decision === 'accept';
+    if (!accept && body.decision !== 'reject') throw new HttpError(422, 'Невалиден отговор.');
+    const name = clean(body.name, 120);
+    if (!name) throw new HttpError(422, 'Въведете името си.', { name: 'Въведете името си.' });
+    const note = clean(body.note, 2000, { multiline: true });
+    const status = accept ? 'Приета' : 'Отказана';
+    const patch = { docStatus: status, decisionAt: nowIso(), decisionBy: name, decisionNote: note, updatedAt: nowIso() };
+    await store.update('documents', doc.id, patch);
+    await audit({ org, user: { id: 'client', fullName: `${name} (клиент, през линк)` } }, 'documents', doc.id, `Офертата е ${status.toLowerCase()} от клиента`, note);
+    // Известие до този, който е създал офертата, и до имейла на фирмата.
+    const subject = `${docTitle(doc)}: ${accept ? 'приета' : 'отказана'} от ${doc.companyName || 'клиента'}`;
+    const message = {
+      title: accept ? 'Офертата е приета' : 'Офертата е отказана',
+      paragraphs: [`${name} от ${doc.companyName || 'клиента'} ${accept ? 'прие' : 'отказа'} ${docTitle(doc)} през линка в имейла.`, note ? `Коментар: ${note}` : ''].filter(Boolean),
+      details: [['Документ', docTitle(doc)], ['Сума', money(doc.total, doc.currency || 'EUR')], ['Отговор', status]],
+      action: { label: 'Отворете офертата', url: `${env.APP_ORIGIN}/app.html#/documents/${doc.id}` },
+    };
+    const notified = await notifyUser(doc.createdBy, subject, message);
+    if (org.email && org.email !== doc.createdBy) await sendMail(org.email, subject, message);
+    else if (!notified && org.email) await sendMail(org.email, subject, message);
+    return json({ ok: true, status });
   }
 
   // --- Плащания ---
@@ -1026,7 +1334,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     };
     await store.create('payments', payment);
     const updated = await recalcPaid(ctx, documentId);
-    await audit(ctx, 'documents', documentId, 'Плащане', `${amount.toFixed(2)} EUR, ${method}`);
+    await audit(ctx, 'documents', documentId, 'Плащане', `${money(amount, doc.currency || 'EUR')}, ${method}`);
     return json({ payment: publicRecord('payments', payment), document: publicDocument(updated) }, 201);
   }
 
@@ -1035,7 +1343,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const payment = await getRecord('payments', id, ctx.org.id);
     await store.remove('payments', id);
     const updated = await recalcPaid(ctx, payment.documentId);
-    await audit(ctx, 'documents', payment.documentId, 'Изтрито плащане', `${Number(payment.amount).toFixed(2)} EUR`);
+    await audit(ctx, 'documents', payment.documentId, 'Изтрито плащане', money(payment.amount, updated.currency || 'EUR'));
     return json({ document: publicDocument(updated) });
   }
 
@@ -1136,8 +1444,22 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
 
   async function saveCompanySettings(request) {
     const ctx = await orgContext(request, { role: 'admin' });
-    const { values, errors } = validateCompany(await readBody(request));
+    const body = await readBody(request);
+    const { values, errors } = validateCompany(body);
+    // Сметките идват като списък; без него първата сметка е от полетата IBAN/BIC/Банка.
+    const rawAccounts = Array.isArray(body.bankAccounts)
+      ? body.bankAccounts
+      : (values.iban ? [{ iban: values.iban, bic: values.bic, bank: values.bank, currency: 'EUR' }] : []);
+    const max = limitOf(ctx.plan, 'maxBankAccounts');
+    const { accounts, error } = validateBankAccounts(rawAccounts, max);
+    if (error) errors.bankAccounts = max < rawAccounts.length ? `${error} За повече сметки е нужен по-голям план.` : error;
+    if (accounts?.some((a) => a.currency !== 'EUR') && !hasFeature(ctx.plan, 'allowCurrencies')) {
+      errors.bankAccounts = `Сметки в други валути не са включени в плана „${ctx.plan.name}“.`;
+    }
+    delete errors.iban;
     failIfErrors(errors);
+    const first = accounts[0] || { iban: '', bic: '', bank: '' };
+    Object.assign(values, { bankAccounts: JSON.stringify(accounts), iban: first.iban, bic: first.bic, bank: first.bank });
     if (values.eik !== ctx.org.eik) {
       const duplicate = (await store.find('orgs', 'eik', values.eik)).find((o) => o.id !== ctx.org.id && o.orgStatus !== 'Спряна');
       if (duplicate) throw new HttpError(409, 'Друга организация вече е регистрирана с този ЕИК.', { eik: 'Вече е регистриран.' });
@@ -1260,8 +1582,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
 
   async function platformOverview(request) {
     await requirePlatformAdmin(request);
-    const [orgs, plans, members, users, companies, contacts, products, deals, documents] = await Promise.all(
-      ['orgs', 'plans', 'members', 'users', 'companies', 'contacts', 'products', 'deals', 'documents'].map((t) => (t === 'plans' ? loadPlans() : store.list(t))),
+    const [orgs, plans, members, users, companies, contacts, products, deals, documents, auditRows] = await Promise.all(
+      ['orgs', 'plans', 'members', 'users', 'companies', 'contacts', 'products', 'deals', 'documents', 'audit'].map((t) => (t === 'plans' ? loadPlans() : store.list(t))),
     );
     const month = today().slice(0, 7);
     const by = (rows, orgId) => rows.filter((r) => r.orgId === orgId);
@@ -1288,7 +1610,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
           })),
           usage: usageOf({
             members: orgMembers, companies: by(companies, o.id), contacts: by(contacts, o.id), products: by(products, o.id),
-            deals: by(deals, o.id), documents: by(documents, o.id),
+            deals: by(deals, o.id), documents: by(documents, o.id), audit: by(auditRows, o.id), bankAccounts: bankAccountsOf(o),
           }, month),
         };
       }),
@@ -1378,7 +1700,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       if (!(n >= 0) || n > 1e9) errors[key] = 'Положително число или празно (без ограничение).';
       else values[key] = key === 'price' ? round2(n) : Math.floor(n);
     }
-    for (const key of ['allowLogo', 'isDefault', 'isActive']) values[key] = body[key] === 'Да' || body[key] === true ? 'Да' : 'Не';
+    for (const key of [...PLAN_FEATURES, 'isDefault', 'isActive']) values[key] = body[key] === 'Да' || body[key] === true ? 'Да' : 'Не';
     failIfErrors(errors);
     if (values.isDefault === 'Да') {
       for (const p of plans.filter((p) => p.isDefault === 'Да' && p.id !== planId)) await store.update('plans', p.id, { isDefault: 'Не' });
@@ -1423,6 +1745,65 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     return json(emailed ? { emailed: true, to: email } : { emailed: false, link });
   }
 
+  // --- Ежедневни напомняния по имейл (Cloudflare Cron, всяка сутрин) ---
+
+  async function dailyDigest() {
+    if (!mailEnabled) return { sent: 0 };
+    const day = today();
+    const soon = new Date(now().getTime() + 3 * 24 * 3600 * 1000).toISOString();
+    const [orgs, plans, members, users, activities, documents, tenders] = await Promise.all(
+      ['orgs', 'plans', 'members', 'users', 'activities', 'documents', 'tenders'].map((t) => (t === 'plans' ? loadPlans() : store.list(t))),
+    );
+    const userMap = new Map(users.map((u) => [u.id, u]));
+    let sent = 0;
+    for (const org of orgs) {
+      if (org.orgStatus !== 'Активна' || paymentDue(org, day)) continue;
+      const plan = effectivePlan(org, plans, day);
+      const orgMembers = members.filter((m) => m.orgId === org.id && m.isActive === 'Да');
+      const admins = orgMembers.filter((m) => m.role === ADMIN).map((m) => m.userId);
+      const items = new Map(); // потребител → редове
+      const add = (userId, line) => {
+        if (!orgMembers.some((m) => m.userId === userId)) return;
+        if (!items.has(userId)) items.set(userId, []);
+        items.get(userId).push(line);
+      };
+      for (const a of activities) {
+        if (a.orgId !== org.id || a.activityStatus !== 'Предстои' || !a.dueDate || a.dueDate > day) continue;
+        add(a.assignedTo, [a.dueDate < day ? 'Просрочена задача' : 'Задача за днес', `${a.subject} (срок ${formatDay(a.dueDate)})`]);
+      }
+      const overdue = documents.filter((d) => d.orgId === org.id && d.docType === 'Фактура' && d.docStatus === 'Издаден'
+        && d.paymentStatus !== 'Платен' && d.dueDate && d.dueDate < day);
+      for (const d of overdue) {
+        for (const admin of admins) {
+          add(admin, ['Просрочена фактура', `№ ${d.number}, ${d.companyName}, ${money((Number(d.total) || 0) - (Number(d.paidAmount) || 0), d.currency || 'EUR')} (падеж ${formatDay(d.dueDate)})`]);
+        }
+      }
+      if (hasFeature(plan, 'allowProcurement')) {
+        for (const t of tenders) {
+          if (t.orgId !== org.id || !OPEN_TENDER_STAGES.includes(t.stage)) continue;
+          const deadlines = [['Срок за въпроси', t.questionsDeadline], ['Срок за подаване', t.submissionDeadline]]
+            .filter(([, at]) => at && at > now().toISOString() && at <= soon);
+          for (const [label, at] of deadlines) {
+            for (const userId of new Set([t.owner, ...admins])) add(userId, [`${label} по обществена поръчка`, `${t.tenderName} — ${formatSofia(at)}`]);
+          }
+        }
+      }
+      for (const [userId, lines] of items) {
+        const user = userMap.get(userId);
+        if (!user || user.isActive !== 'Да' || user.notifyEmail === 'Не') continue;
+        const ok = await sendMail(userId, `${org.name}: ${lines.length} ${lines.length === 1 ? 'напомняне' : 'напомняния'} за днес`, {
+          title: `Напомняния за ${formatDay(day)}`,
+          paragraphs: [`Какво чака действие в „${org.name}“:`],
+          details: lines.slice(0, 25),
+          action: { label: 'Отворете BulAdmin Cloud', url: `${env.APP_ORIGIN}/app.html` },
+          note: 'Известията се изключват от „Профил“ в BulAdmin Cloud.',
+        });
+        if (ok) sent += 1;
+      }
+    }
+    return { sent };
+  }
+
   // --- Маршрутизиране ---
 
   async function route(request, url, ctx) {
@@ -1431,6 +1812,10 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     let m;
 
     if (method === 'GET' && path === '/api/meta') return meta();
+    // Оферта през линк: без вход, затова с ограничение на опитите.
+    if (method === 'POST' && ['/api/public/offer', '/api/public/offer/decision'].includes(path)) await rateLimit(request, 'offer');
+    if (method === 'POST' && path === '/api/public/offer') return publicOffer(request);
+    if (method === 'POST' && path === '/api/public/offer/decision') return offerDecision(request);
     if (method === 'GET' && path === '/api/me') return me(request);
     if (method === 'GET' && (m = path.match(/^\/api\/auth\/(\w+)\/start$/)) && isProvider(m[1])) return authStart(m[1]);
     if (method === 'GET' && (m = path.match(/^\/api\/auth\/(\w+)\/callback$/)) && isProvider(m[1])) return authCallback(request, m[1], url);
@@ -1455,6 +1840,9 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (method === 'GET' && (m = path.match(/^\/api\/orgs\/([\w-]{1,40})\/logo$/))) return getLogo(request, m[1]);
 
     if (method === 'GET' && path === '/api/data') return bootstrap(request);
+    if (method === 'GET' && path === '/api/rates') return ecbRate(request, url);
+    if (method === 'PUT' && (m = path.match(/^\/api\/tenders\/([\w-]{1,40})\/checklist$/))) return saveChecklist(request, m[1]);
+    if (method === 'POST' && (m = path.match(/^\/api\/documents\/([\w-]{1,40})\/send$/))) return sendDocument(request, m[1]);
     if (method === 'GET' && (m = path.match(/^\/api\/history\/(\w+)\/([^/]{1,200})$/))) return history(request, m[1], decodeURIComponent(m[2]));
     if ((m = path.match(/^\/api\/data\/(\w+)(?:\/([\w-]{1,40}))?$/)) && GENERIC.includes(m[1])) {
       if (method === 'POST' && !m[2]) return createGeneric(request, m[1]);
@@ -1497,7 +1885,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     throw new HttpError(404, 'Няма такъв адрес.');
   }
 
-  return async function handle(request, ctx) {
+  const handle = async function handle(request, ctx) {
     try {
       // SameSite=Lax пази сесията, а тази проверка спира междусайтови заявки за промяна.
       if (!['GET', 'HEAD'].includes(request.method) && request.headers.get('origin') !== env.APP_ORIGIN) {
@@ -1517,4 +1905,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       return json({ error: { message: 'Възникна грешка. Опитайте отново след малко.' } }, 500);
     }
   };
+  // Ежедневните напомняния се пускат от Cloudflare Cron (виж index.js).
+  handle.digest = dailyDigest;
+  return handle;
 }

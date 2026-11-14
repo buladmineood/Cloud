@@ -7,6 +7,7 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp, SESSION_COOKIE } from '../src/app.js';
 import { computeTotals } from '../src/documents.js';
+import { defaultChecklist } from '../src/procurement.js';
 import { b64url, sha256, signToken } from '../src/crypto.js';
 import { MemoryStore } from '../src/store.js';
 
@@ -27,7 +28,7 @@ const day = (offset) => new Date(Date.now() + offset * 864e5).toISOString().slic
 const stamp = (days) => ({ createdAt: at(days), updatedAt: at(days) });
 
 const company = {
-  name: 'БУЛАДМИН ООД', eik: '206543210', vatNumber: 'BG206543210', mol: 'Демо Администратор', city: 'София',
+  name: 'БУЛАДМИН ООД', eik: '831641791', vatNumber: 'BG831641791', mol: 'Демо Администратор', city: 'София',
   address: 'бул. Витоша 1', phone: '+359 2 123 4567', email: 'office@buladmin.eu', iban: 'BG80BNBG96611020345678', bank: 'Демо банка',
   bic: 'BNBGBGSF', vatRegistered: 'Да', invoiceStart: '1', dueDays: '7', currency: 'EUR',
 };
@@ -86,7 +87,7 @@ const seed = {
   documents: [
     doc('DOC-DEMO0001', 'Фактура', '0000000001', 'Издаден', 'CO-DEMO0001', 25, { paidAmount: totals.total, paymentStatus: 'Платен' }),
     doc('DOC-DEMO0002', 'Фактура', '0000000002', 'Издаден', 'CO-DEMO0001', 12),
-    doc('DOC-DEMO0003', 'Оферта', `OF-${new Date().getFullYear()}-0001`, 'Издаден', 'CO-DEMO0002', 8, { dealId: 'DL-DEMO0001' }),
+    doc('DOC-DEMO0003', 'Оферта', `OF-${new Date().getFullYear()}-0001`, 'Издаден', 'CO-DEMO0002', 8, { dealId: 'DL-DEMO0001', dueDate: day(20) }),
     doc('DOC-DEMO0004', 'Фактура', '', 'Чернова', 'CO-DEMO0001', 0),
   ],
   payments: [
@@ -103,7 +104,13 @@ delete seed.settings;
 seed.users = seed.users.map(({ role, ...u }) => u);
 seed.users[0].platformRole = 'Администратор на БУЛАДМИН';
 seed.orgs = [
-  { id: ORG, ...company, planId: 'standard', orgStatus: 'Активна', createdBy: 'admin@buladmin.eu', createdAt: at(60), updatedAt: at(60) },
+  {
+    id: ORG, ...company, planId: 'eop', orgStatus: 'Активна', createdBy: 'admin@buladmin.eu', createdAt: at(60), updatedAt: at(60),
+    bankAccounts: JSON.stringify([
+      { iban: company.iban, bic: company.bic, bank: company.bank, currency: 'EUR', label: 'Основна' },
+      { iban: 'BG18RZBB91550123456789', bic: 'RZBBBGSF', bank: 'Демо банка 2', currency: 'USD', label: 'Доларова' },
+    ]),
+  },
   { id: 'ORG-DEMO0002', ...company, name: 'Втора фирма ЕООД', eik: '202020204', vatRegistered: 'Не', vatNumber: '', planId: 'free', orgStatus: 'Активна', createdBy: 'admin@buladmin.eu', createdAt: at(5), updatedAt: at(5) },
 ];
 const member = (orgId, userId, role) => ({ id: `${orgId}:${userId}`, orgId, userId, role, isActive: 'Да', createdAt: at(30) });
@@ -111,6 +118,16 @@ seed.members = [
   member(ORG, 'admin@buladmin.eu', 'Администратор'), member(ORG, 'sales@buladmin.eu', 'Потребител'),
   member(ORG, 'viewer@buladmin.eu', 'Наблюдател'), member(ORG, 'nov@buladmin.eu', 'Потребител'),
   member('ORG-DEMO0002', 'admin@buladmin.eu', 'Администратор'), member('ORG-DEMO0002', 'sales@buladmin.eu', 'Администратор'),
+];
+const inDays = (d, hour) => { const x = new Date(Date.now() + d * 864e5); x.setUTCHours(hour, 0, 0, 0); return x.toISOString().replace(/.d+Z$/, 'Z'); };
+seed.tenders = [
+  {
+    id: 'TN-DEMO0001', orgId: ORG, tenderName: 'Счетоводно обслужване на общинско предприятие', eopNumber: '00123-2026-0045', authority: 'Община Пример',
+    procedureType: 'Публично състезание', stage: 'Подготовка', eopUrl: 'https://app.eop.bg/', cpv: '79211000', lots: 'Обособена позиция 1',
+    estimatedValue: 24000, questionsDeadline: inDays(1, 14), submissionDeadline: inDays(6, 15), openingDate: inDays(7, 8),
+    guaranteeType: 'Няма', guaranteeReturned: 'Неприложимо', owner: 'admin@buladmin.eu', createdAt: at(4), updatedAt: at(4),
+    checklist: JSON.stringify(defaultChecklist()),
+  },
 ];
 const store = new MemoryStore(seed);
 const app = createApp({ env, store });

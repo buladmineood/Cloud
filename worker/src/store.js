@@ -194,14 +194,29 @@ export class GraphStore {
     if (!res.ok && res.status !== 404) throw new Error(`Delete failed: ${res.status}`);
   }
 
-  sendMail(from, to, subject, { html }) {
+  // to и cc са адрес или списък от адреси; attachments: [{ name, contentType, bytes }] (до 3 MB общо).
+  sendMail(from, to, subject, { html }, { cc = [], replyTo, attachments = [] } = {}) {
+    const list = (value) => [value].flat().filter(Boolean).map((address) => ({ emailAddress: { address } }));
+    let binary = '';
+    const base64 = (bytes) => {
+      binary = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      return btoa(binary);
+    };
     return this.request(`${GRAPH}/users/${encodeURIComponent(from)}/sendMail`, {
       method: 'POST',
       body: JSON.stringify({
         message: {
           subject,
           body: { contentType: 'HTML', content: html },
-          toRecipients: [{ emailAddress: { address: to } }],
+          toRecipients: list(to),
+          ccRecipients: list(cc),
+          ...(replyTo && { replyTo: list(replyTo) }),
+          ...(attachments.length && {
+            attachments: attachments.map((a) => ({
+              '@odata.type': '#microsoft.graph.fileAttachment', name: a.name, contentType: a.contentType, contentBytes: base64(a.bytes),
+            })),
+          }),
         },
         saveToSentItems: false,
       }),
@@ -229,7 +244,7 @@ export class MemoryStore {
     return file.bytes;
   }
   async deleteFile(itemId) { this.files.delete(itemId); }
-  async sendMail(from, to, subject, { html, text }) { this.sentMail.push({ from, to, subject, text, html }); }
+  async sendMail(from, to, subject, { html, text }, extra = {}) { this.sentMail.push({ from, to, subject, text, html, ...extra }); }
   async list(table) { return this.tables[table].map((r) => ({ ...r })); }
   async find(table, field, value) { return (await this.list(table)).filter((r) => r[field] === value); }
   async create(table, record) { this.tables[table].push({ ...record }); return record; }

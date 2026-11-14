@@ -19,8 +19,20 @@ function actionBlock({ label, url }) {
     <p style="margin:0 0 24px;font:12px/1.5 ${FONT};color:${C.muted};">Ако бутонът не работи, копирайте този адрес в браузъра:<br><a href="${esc(url)}" style="color:${C.navy};word-break:break-all;">${esc(url)}</a></p>`;
 }
 
+function detailsBlock(rows) {
+  const cell = (i) => (i ? `border-top:1px solid ${C.line};` : '');
+  const body = rows.map(([label, value], i) => `<tr>
+    <td style="padding:9px 14px;${cell(i)}font:13px/1.4 ${FONT};color:${C.muted};width:40%;">${esc(label)}</td>
+    <td style="padding:9px 14px;${cell(i)}font:600 14px/1.4 ${FONT};color:${C.ink};">${esc(value)}</td>
+  </tr>`).join('');
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;border:1px solid ${C.line};border-radius:8px;border-collapse:separate;background:${C.tint};">${body}</table>`;
+}
+
+const AUTO_FOOTER = 'Това съобщение е изпратено автоматично. Моля, не отговаряйте на него.';
+
 // Връща HTML и текстова версия на едно и също съобщение.
-export function renderEmail({ origin, preheader, title, paragraphs = [], action, note }) {
+// footer заменя текста „не отговаряйте“ — за писма до клиенти, на които те могат да отговорят.
+export function renderEmail({ origin, preheader, title, paragraphs = [], details = [], action, note, footer }) {
   const p = (text) => `<p style="margin:0 0 16px;font:15px/1.6 ${FONT};color:${C.ink};">${esc(text)}</p>`;
   const html = `<!doctype html>
 <html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><title>${esc(title)}</title></head>
@@ -38,12 +50,13 @@ export function renderEmail({ origin, preheader, title, paragraphs = [], action,
     <tr><td style="padding:32px 28px 8px;">
       <h1 style="margin:0 0 18px;font:700 22px/1.3 ${FONT};color:${C.ink};">${esc(title)}</h1>
       ${paragraphs.map(p).join('')}
+      ${details.length ? detailsBlock(details) : ''}
       ${action ? actionBlock(action) : ''}
       ${note ? `<p style="margin:0 0 24px;font:13px/1.6 ${FONT};color:${C.muted};">${esc(note)}</p>` : ''}
     </td></tr>
     <tr><td style="padding:20px 28px 24px;border-top:1px solid ${C.line};background:${C.tint};border-radius:0 0 12px 12px;">
       <p style="margin:0 0 6px;font:600 13px/1.5 ${FONT};color:${C.ink};">BulAdmin CRM / BulAdmin ERP</p>
-      <p style="margin:0;font:12px/1.6 ${FONT};color:${C.muted};">Това съобщение е изпратено автоматично. Моля, не отговаряйте на него.<br>Никога няма да Ви поискаме парола или код по имейл или телефон.</p>
+      <p style="margin:0;font:12px/1.6 ${FONT};color:${C.muted};">${footer ? esc(footer) : `${AUTO_FOOTER}<br>Никога няма да Ви поискаме парола или код по имейл или телефон.`}</p>
     </td></tr>
   </table>
 </td></tr></table>
@@ -53,11 +66,13 @@ export function renderEmail({ origin, preheader, title, paragraphs = [], action,
     title,
     '',
     ...paragraphs.flatMap((t) => [t, '']),
+    ...details.map(([label, value]) => `${label}: ${value}`),
+    ...(details.length ? [''] : []),
     ...(action ? [`${action.label}: ${action.url}`, ''] : []),
     ...(note ? [note, ''] : []),
     'BulAdmin CRM / BulAdmin ERP',
     origin,
-    'Това съобщение е изпратено автоматично. Моля, не отговаряйте на него.',
+    footer || AUTO_FOOTER,
   ].join('\n');
   return { html, text };
 }

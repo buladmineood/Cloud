@@ -35,6 +35,25 @@ export function isValidDay(value) {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
+// Дата и час, въведени по българско време (2026-11-20T17:00), към UTC ISO за SharePoint.
+const LOCAL_DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::\d{2})?$/;
+export function sofiaToUtc(value) {
+  if (/Z$|[+-]\d{2}:\d{2}$/.test(value)) {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString().replace(/\.\d+Z$/, 'Z');
+  }
+  const m = value.match(LOCAL_DATETIME);
+  if (!m) return null;
+  const [, y, mo, d, h, mi] = m.map(Number);
+  const asUtc = Date.UTC(y, mo - 1, d, h, mi);
+  if (new Date(asUtc).getUTCDate() !== d || h > 23 || mi > 59) return null;
+  // Отместването на София в този момент (+2 или +3 часа според лятното време).
+  const offsetName = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Sofia', timeZoneName: 'shortOffset' })
+    .formatToParts(new Date(asUtc)).find((p) => p.type === 'timeZoneName')?.value || 'GMT+2';
+  const offset = Number((offsetName.match(/GMT([+-]\d+)/) || [0, 2])[1]);
+  return new Date(asUtc - offset * 3600 * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+}
+
 export function passwordError(password) {
   if (password.length < 10) return 'Паролата трябва да е поне 10 знака.';
   if (password.length > 128) return 'Паролата трябва да е до 128 знака.';
@@ -67,6 +86,12 @@ export function validateRecord(entity, body, { partial = false } = {}) {
     if (!value) {
       if (column.required) errors[column.name] = 'Задължително поле.';
       values[column.name] = '';
+      continue;
+    }
+    if (column.kind === 'date') {
+      const iso = sofiaToUtc(value);
+      if (!iso) errors[column.name] = 'Невалидни дата и час.';
+      else values[column.name] = iso;
       continue;
     }
     if (column.kind === 'choice' && !column.choices.includes(value)) errors[column.name] = 'Изберете стойност от списъка.';

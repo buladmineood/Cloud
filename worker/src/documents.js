@@ -8,6 +8,31 @@ export const MAX_LINES = 100;
 export const TAX_DOCS = ['Фактура', 'Кредитно известие'];
 const PREFIX = { 'Оферта': 'OF', 'Проформа фактура': 'PF' };
 
+// Валутите за документи. EUR е националната валута; при друга валута документът носи курс на ЕЦБ
+// и данъчната основа и ДДС се показват и в евро, защото по ЗДДС данъкът се посочва и в националната валута.
+export const CURRENCIES = ['EUR', 'USD', 'GBP', 'CHF', 'RON', 'TRY', 'PLN', 'CZK', 'HUF', 'SEK', 'DKK', 'NOK', 'JPY', 'CNY'];
+
+const IBAN_RE = /^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/;
+export function validateBankAccounts(raw, max) {
+  if (!Array.isArray(raw)) return { accounts: [] };
+  if (raw.length > max) return { error: `Планът позволява до ${max} банкови сметки.` };
+  const accounts = [];
+  for (const [i, row] of raw.entries()) {
+    const iban = String(row?.iban || '').replace(/\s/g, '').toUpperCase();
+    if (!IBAN_RE.test(iban)) return { error: `Сметка ${i + 1}: невалиден IBAN.` };
+    const currency = CURRENCIES.includes(row.currency) ? row.currency : 'EUR';
+    accounts.push({
+      iban,
+      bic: String(row.bic || '').replace(/\s/g, '').toUpperCase().slice(0, 11),
+      bank: String(row.bank || '').trim().slice(0, 120),
+      currency,
+      label: String(row.label || '').trim().slice(0, 60),
+    });
+  }
+  if (new Set(accounts.map((a) => a.iban)).size !== accounts.length) return { error: 'Една и съща сметка е въведена два пъти.' };
+  return { accounts };
+}
+
 export const DEFAULT_COMPANY = {
   name: '', eik: '', vatNumber: '', mol: '', city: '', address: '', phone: '', email: '',
   iban: '', bank: '', bic: '', vatRegistered: 'Да', invoiceStart: '1', dueDays: '7', currency: 'EUR',

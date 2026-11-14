@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test",
     "dev": "node dev/server.mjs",
     "provision": "node scripts/provision.mjs",
     "secrets": "node scripts/push-secrets.mjs",

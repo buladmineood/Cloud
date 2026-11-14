@@ -172,3 +172,34 @@ td .tag { display: inline-block; margin: 2px 4px 2px 0; text-decoration: none; }
 .plan-option__price { font-weight: 650; white-space: nowrap; }
 .text-warn { color: var(--warn-ink); font-weight: 600; }
 fieldset.field > legend { font-weight: 600; margin-bottom: 8px; }
+
+/* Банкови сметки в настройките */
+.account-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); }
+.account-row > .field { grid-column: 1; }
+.account-row__grid { grid-column: 1; display: grid; grid-template-columns: 1fr 1.6fr .8fr 1.2fr; gap: 8px; }
+.account-row > .icon-btn { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+.account-row input, .account-row select, .row-tight > input {
+  width: 100%; min-height: 40px; padding: 7px 10px; border: 1px solid var(--field-line); border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit;
+}
+@media (max-width: 700px) { .account-row__grid { grid-template-columns: 1fr 1fr; } }
+.field input[type="datetime-local"] { width: 100%; min-height: 44px; padding: 9px 12px; border: 1px solid var(--field-line); border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; }
+.row-tight > input { flex: 1; min-width: 120px; }
+.totals .totals__note { grid-column: 1 / -1; padding-top: 10px; font-size: .82rem; }
+
+/* ЦАИС ЕОП */
+.stage-bar--wrap { grid-auto-flow: row; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); }
+.stage-bar__step[aria-pressed="true"][data-stage="Договор"], .stage-bar__step[aria-pressed="true"][data-stage="Класирана първа"] { background: var(--ok); border-color: var(--ok); color: #fff; }
+.stage-bar__step[aria-pressed="true"][data-stage="Неуспешна"], .stage-bar__step[aria-pressed="true"][data-stage="Прекратена"], .stage-bar__step[aria-pressed="true"][data-stage="Отказ от участие"] { background: var(--danger); border-color: var(--danger); color: #fff; }
+.checklist { display: grid; gap: 16px; }
+.checklist__group h3 { margin-bottom: 8px; font-size: .9rem; color: var(--ink-2); text-transform: uppercase; letter-spacing: .06em; }
+.checklist__item { display: grid; grid-template-columns: 130px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 10px 0; border-top: 1px solid var(--line); }
+.checklist__item select { min-height: 34px; padding: 4px 8px; border: 1px solid var(--field-line); border-radius: 7px; background: var(--paper); color: var(--ink); font: inherit; font-size: .85rem; }
+.checklist__item--done select { border-color: var(--ok); color: var(--ok); font-weight: 600; }
+.checklist__item--na .checklist__text > span { text-decoration: line-through; color: var(--ink-2); }
+.checklist__text { display: grid; gap: 4px; font-size: .92rem; }
+.checklist__note { min-height: 32px; padding: 4px 8px; border: 1px dashed var(--line); border-radius: 6px; background: transparent; color: var(--ink); font: inherit; font-size: .85rem; }
+@media (max-width: 600px) { .checklist__item { grid-template-columns: minmax(0, 1fr) auto; } .checklist__item select { grid-column: 1 / -1; } }
+.pill[data-stage="Проучване"], .pill[data-stage="Подготовка"] { background: var(--tint); color: var(--ink); border-color: var(--line); }
+.pill[data-stage="Подадена"], .pill[data-stage="Оценка"] { background: var(--info-bg); color: var(--info-ink); border-color: var(--info-line); }
+.pill[data-stage="Класирана първа"], .pill[data-stage="Договор"] { background: var(--ok-bg); color: var(--ok); border-color: var(--ok-line); }
+.pill[data-stage="Неуспешна"], .pill[data-stage="Отказ от участие"], .pill[data-stage="Прекратена"] { background: var(--err-bg); color: var(--error); border-color: var(--err-line); }

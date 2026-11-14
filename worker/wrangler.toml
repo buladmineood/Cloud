@@ -22,3 +22,7 @@ MAIL_FROM = "no-reply@cloud.buladmin.eu"
 name = "LOGIN_LIMITER"
 namespace_id = "1002"
 simple = { limit = 20, period = 60 }
+
+# Ежедневни напомняния по имейл в 6:00 UTC (8:00 или 9:00 българско време).
+[triggers]
+crons = ["0 6 * * *"]

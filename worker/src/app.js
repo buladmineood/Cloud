@@ -20,7 +20,6 @@ const SESSION_TTL = 12 * 3600;
 const FLOW_TTL = 600;
 const MAX_BODY = 256 * 1024;
 const MAX_LOGO_BYTES = 300 * 1024;
-const MAX_PDF_BYTES = 5 * 1024 * 1024;
 const MAX_FAILED_LOGINS = 5;
 const LOCK_MS = 15 * 60 * 1000;
 const LINK_TTL_MS = 72 * 3600 * 1000;
@@ -104,7 +103,6 @@ function publicDocument(d) {
   const { orgId, ...rest } = d;
   return {
     ...rest,
-    hasPdf: !!d.pdfItemId,
     lines: parseJson(d.lines, []),
     buyer: parseJson(d.buyer, null),
     seller: parseJson(d.seller, null),
@@ -975,35 +973,6 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     return json(publicDocument(record), 201);
   }
 
-  // PDF файлът се създава в браузъра и се пази в библиотеката на SharePoint до документа.
-  async function savePdf(request, id) {
-    const ctx = await orgContext(request, { role: 'editor' });
-    const doc = await getRecord('documents', id, ctx.org.id);
-    if (doc.docStatus === 'Чернова') throw new HttpError(409, 'Черновите не се архивират.');
-    const { bytes } = await readBytes(request, MAX_PDF_BYTES, ['application/pdf']);
-    if (new TextDecoder().decode(bytes.slice(0, 5)) !== '%PDF-') throw new HttpError(415, 'Файлът не е PDF.');
-    const safe = (s) => String(s).replace(/[^\p{L}\p{N} ._-]/gu, '_');
-    const path = `Документи/${ctx.org.id}/${doc.issueDate.slice(0, 4)}/${safe(doc.docType)} ${safe(doc.number)}.pdf`;
-    const itemId = await store.uploadFile(path, bytes, 'application/pdf');
-    await store.update('documents', id, { pdfItemId: itemId });
-    return json({ ok: true, hasPdf: true });
-  }
-
-  async function getPdf(request, id) {
-    const ctx = await orgContext(request);
-    const doc = await getRecord('documents', id, ctx.org.id);
-    if (!doc.pdfItemId) throw new HttpError(404, 'Няма запазен PDF.');
-    const bytes = await store.downloadFile(doc.pdfItemId);
-    return new Response(bytes, {
-      headers: {
-        'content-type': 'application/pdf',
-        'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(`${doc.docType} ${doc.number}.pdf`)}`,
-        'cache-control': 'private, no-store',
-        'x-content-type-options': 'nosniff',
-      },
-    });
-  }
-
   // --- Плащания ---
 
   async function recalcPaid(ctx, documentId) {
@@ -1437,10 +1406,6 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if ((m = path.match(/^\/api\/documents\/([\w-]{1,40})$/))) {
       if (method === 'PATCH') return updateDocument(request, m[1]);
       if (method === 'DELETE') return deleteDocument(request, m[1]);
-    }
-    if ((m = path.match(/^\/api\/documents\/([\w-]{1,40})\/pdf$/))) {
-      if (method === 'PUT') return savePdf(request, m[1]);
-      if (method === 'GET') return getPdf(request, m[1]);
     }
     if (method === 'POST' && (m = path.match(/^\/api\/documents\/([\w-]{1,40})\/(issue|cancel|status|derive)$/))) {
       const action = { issue: issueDocument, cancel: cancelDocument, status: setOfferStatus, derive: deriveDocument }[m[2]];

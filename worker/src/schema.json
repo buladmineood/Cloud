@@ -242,8 +242,7 @@
       { "name": "issuedBy", "label": "Съставил", "kind": "text" },
       { "name": "issuedAt", "label": "Издаден на", "kind": "date" },
       { "name": "createdAt", "label": "Създаден", "kind": "date" },
-      { "name": "updatedAt", "label": "Обновен", "kind": "date" },
-      { "name": "pdfItemId", "label": "PDF в SharePoint", "kind": "text" }
+      { "name": "updatedAt", "label": "Обновен", "kind": "date" }
     ]
   },
   "payments": {

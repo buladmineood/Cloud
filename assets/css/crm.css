@@ -118,20 +118,13 @@ tr.is-muted td { opacity: .6; }
 .doc-print__lines td { display: table-cell; padding: 6px 8px; border-top: 1px solid var(--line); }
 @media (max-width: 800px) { .doc-print__parties { grid-template-columns: minmax(0, 1fr); } }
 
+/* Печатът от браузъра е изключен: документите се дават само като PDF (бутонът „Изтеглете PDF“). */
 @media print {
-  :root, :root[data-theme="dark"] {
-    color-scheme: light; --paper: #fff; --bg: #fff; --ink: #000; --ink-2: #333; --line: #999; --tint: #eee; --gold: #b5862a;
+  body > * { display: none !important; }
+  body::before {
+    content: "Печатът от BulAdmin Cloud е изключен. Изтеглете документа като PDF от бутона „Изтеглете PDF“.";
+    display: block; padding: 24mm 18mm; font: 14pt/1.5 sans-serif; color: #000;
   }
-  body { background: #fff; color: #000; }
-  .app { display: block; padding: 0; }
-  .app__side, .app__top, .no-print, .toasts, .cookie-notice { display: none !important; }
-  .page { width: 100%; padding: 0; }
-  .split { display: block; }
-  .card.doc-sheet { border: 0; box-shadow: none; padding: 0; overflow: visible; }
-  .doc-print { font-size: 10.5pt; }
-  .doc-print__lines { min-width: 0; width: 100%; }
-  .doc-print__parties { grid-template-columns: 1fr 1fr; }
-  @page { margin: 14mm; }
 }
 
 /* Избор на организация */

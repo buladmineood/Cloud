@@ -234,23 +234,16 @@ test('номерацията е отделна за всяка организа�
   assert.equal(issued.data.number, '0000000001');
 });
 
-test('фактура: издаване, наличност, плащане, кредитно известие, PDF в архива', async () => {
+test('фактура: издаване, наличност, плащане, кредитно известие; PDF не се пази на сървъра', async () => {
   const { store, call } = setup();
   const draft = await call('POST', '/api/documents', { as: 'user@x.bg', body: { docType: 'Фактура', companyId: 'CO-1', lines: LINES } });
   const id = draft.data.id;
-  assert.equal((await call('PUT', `/api/documents/${id}/pdf`, { as: 'user@x.bg', raw: new TextEncoder().encode('%PDF-1.7'), type: 'application/pdf' })).status, 409);
   const issued = await call('POST', `/api/documents/${id}/issue`, { as: 'user@x.bg' });
   assert.equal(issued.data.number, '0000000001');
   assert.equal((await store.find('products', 'id', 'PR-2'))[0].stock, 47);
-
-  assert.equal((await call('PUT', `/api/documents/${id}/pdf`, { as: 'user@x.bg', raw: new TextEncoder().encode('<html>'), type: 'application/pdf' })).status, 415);
-  const pdf = new TextEncoder().encode('%PDF-1.7 test');
-  assert.equal((await call('PUT', `/api/documents/${id}/pdf`, { as: 'user@x.bg', raw: pdf, type: 'application/pdf' })).status, 200);
-  const back = await call('GET', `/api/documents/${id}/pdf`, { as: 'viewer@x.bg' });
-  assert.equal(back.status, 200);
-  assert.deepEqual([...back.data], [...pdf]);
-  assert.equal([...store.files.values()][0].path, 'Документи/ORG-A/2026/Фактура 0000000001.pdf');
-  assert.equal((await call('GET', `/api/documents/${id}/pdf`, { as: 'other@y.bg', org: 'ORG-B' })).status, 404);
+  // PDF се създава наново в браузъра всеки път; адресът за архив вече не съществува.
+  assert.equal((await call('PUT', `/api/documents/${id}/pdf`, { as: 'user@x.bg', raw: new TextEncoder().encode('%PDF-1.7'), type: 'application/pdf' })).status, 404);
+  assert.equal(store.files.size, 0);
 
   const part = await call('POST', '/api/payments', { as: 'user@x.bg', body: { documentId: id, amount: '100' } });
   assert.equal(part.data.document.paymentStatus, 'Частично платен');

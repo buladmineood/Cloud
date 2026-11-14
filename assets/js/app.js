@@ -1,8 +1,8 @@
 import {
   api, confirmDialog, downloadCsv, emptyState, fatal, field, formatDate, formatTime, formDialog, formValues, h, icon, linkBox,
   money, mountShell, norm, num, pageHead, parseNum, pill, round2, selectField, setOrg, showError, showFieldErrors, timeAgo, toast, today,
-} from './core.js?v=1f3dfa6dd8';
-import { buildPdf, saveFile } from './pdf.js?v=1f3dfa6dd8';
+} from './core.js?v=34a913be9f';
+import { buildPdf, saveFile } from './pdf.js?v=34a913be9f';
 
 let shell;
 let main;
@@ -768,13 +768,7 @@ function documentEditor(doc, query) {
         });
         if (!ok) { go(`#/documents/${s.id}`); return; }
         const issued = await act(() => api(`/documents/${s.id}/issue`, { method: 'POST' }), `Издаден ${docType}.`);
-        if (!issued) return;
-        go(`#/documents/${s.id}`);
-        // PDF на издадения документ се архивира в SharePoint на заден план.
-        archivePdf(find('documents', s.id) || issued)
-          .then(() => refresh())
-          .then(() => { if (location.hash === `#/documents/${s.id}`) route(); })
-          .catch((err) => toast(`PDF не беше архивиран: ${err.message}`, 'error'));
+        if (issued) go(`#/documents/${s.id}`);
       },
     }, icon('send', 18), 'Издайте'),
     doc && h('button', {
@@ -828,10 +822,6 @@ async function makePdf(doc) {
   });
 }
 const pdfName = (doc) => `${doc.docType} ${doc.number || 'чернова'}.pdf`;
-async function archivePdf(doc) {
-  const bytes = await makePdf(doc);
-  await api(`/documents/${doc.id}/pdf`, { method: 'PUT', bytes, type: 'application/pdf' });
-}
 
 function documentPrint(doc) {
   const seller = doc.seller || data.company;
@@ -909,9 +899,8 @@ async function viewDocument(id, query) {
   page(
     h('a', { class: 'back no-print', href: '#/documents' }, icon('back', 16), 'Оферти и фактури'),
     h('div', { class: 'no-print' }, pageHead(`${doc.docType} ${doc.number}`, `${doc.companyName} · ${money(doc.total)}`,
-      h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => window.print() }, icon('printer', 18), 'Печат'),
       h('button', {
-        class: 'btn', type: 'button',
+        class: 'btn', type: 'button', title: 'PDF се създава наново от данните на документа',
         onclick: async (event) => {
           const button = event.currentTarget;
           button.disabled = true;
@@ -922,7 +911,7 @@ async function viewDocument(id, query) {
           }
           button.disabled = false;
         },
-      }, icon('download', 18), 'PDF'))),
+      }, icon('download', 18), 'Изтеглете PDF'))),
     h('div', { class: 'row no-print' }, pill(doc.docStatus, 'doc'), payable && pill(doc.paymentStatus, 'pay'), actions),
     h('div', { class: 'split' },
       h('div', { class: 'card doc-sheet' }, documentPrint(doc)),
@@ -941,19 +930,7 @@ async function viewDocument(id, query) {
         h('section', { class: 'card' }, h('dl', { class: 'details details--stacked' },
           h('dt', {}, 'Контрагент'), h('dd', {}, refLink('companies', doc.companyId)),
           doc.dealId && [h('dt', {}, 'Сделка'), h('dd', {}, refLink('deals', doc.dealId))],
-          h('dt', {}, 'Издаден'), h('dd', {}, `${formatTime(doc.issuedAt)} · ${doc.issuedBy}`),
-          h('dt', {}, 'Архив в SharePoint'),
-          h('dd', {}, doc.hasPdf
-            ? h('button', {
-              class: 'link-btn', type: 'button',
-              onclick: async () => {
-                try { saveFile(await api(`/documents/${id}/pdf`, { raw: true }), pdfName(doc)); } catch (err) { toast(err.message, 'error'); }
-              },
-            }, 'Изтеглете архивния PDF')
-            : [h('span', { class: 'muted' }, 'няма '), canEdit() && doc.docStatus !== 'Чернова' && h('button', {
-              class: 'link-btn', type: 'button',
-              onclick: () => act(() => archivePdf(doc), 'PDF е архивиран в SharePoint.').then(route),
-            }, 'архивирайте')]))),
+          h('dt', {}, 'Издаден'), h('dd', {}, `${formatTime(doc.issuedAt)} · ${doc.issuedBy}`))),
         await historyCard('documents', id))));
 }
 

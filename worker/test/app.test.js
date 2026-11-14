@@ -6,7 +6,7 @@ import { computeTotals, nextNumber, validateLines } from '../src/documents.js';
 import { effectivePlan } from '../src/plans.js';
 import { MemoryStore } from '../src/store.js';
 
-import { COMPANY, env, LINES, ORIGIN, PNG, setup } from './helpers.js';
+import { COMPANY, env, LINES, ORIGIN, PNG, setup, siteOf } from './helpers.js';
 
 test('без сесия данните не са достъпни', async () => {
   const { call } = setup();
@@ -76,7 +76,7 @@ test('администратор на БУЛАДМИН влиза във вся�
 test('ограничения на безплатния план: контрагенти, фактури, потребители, лого', async () => {
   const many = Array.from({ length: 10 }, (_, i) => ({ id: `CO-F${i}`, orgId: 'ORG-A', name: `Ф${i}`, relation: 'Клиент', city: 'С', address: 'а' }));
   const { store, call } = setup({}, { plan: 'free' });
-  store.tables.companies = many.concat(store.tables.companies.filter((c) => c.orgId !== 'ORG-A'));
+  store.forSite(siteOf('ORG-A')).tables.companies = many;
   const over = await call('POST', '/api/data/companies', { as: 'admin@x.bg', body: { name: 'Единадесети' } });
   assert.equal(over.status, 402);
   assert.match(over.data.error.message, /до 10 контрагенти/);
@@ -84,7 +84,7 @@ test('ограничения на безплатния план: контраг�
   assert.equal((await call('POST', '/api/org/members', { as: 'admin@x.bg', body: { email: 'n@x.bg', role: 'Потребител' } })).status, 402);
   assert.equal((await call('PUT', '/api/org/logo', { as: 'admin@x.bg', raw: PNG, type: 'image/png' })).status, 402);
 
-  store.tables.documents = Array.from({ length: 10 }, (_, i) => ({
+  store.forSite(siteOf('ORG-A')).tables.documents = Array.from({ length: 10 }, (_, i) => ({
     id: `D${i}`, orgId: 'ORG-A', docType: 'Фактура', docStatus: 'Издаден', number: String(i + 1).padStart(10, '0'), issueDate: '2026-11-02',
   }));
   const draft = await call('POST', '/api/documents', { as: 'admin@x.bg', body: { docType: 'Фактура', companyId: 'CO-F1', lines: LINES } });
@@ -127,12 +127,27 @@ test('членове: покана, роли и последен админис�
   assert.equal((await store.find('members', 'id', 'ORG-A:nov@x.bg'))[0].role, 'Потребител');
 });
 
-test('спряна организация не е достъпна за членовете', async () => {
-  const { call } = setup();
+test('спряна организация е само за четене: не се създават и не се въвеждат нови данни', async () => {
+  const { call, store } = setup();
   assert.equal((await call('PATCH', '/api/platform/orgs/ORG-A', { as: 'staff@buladmin.eu', body: { status: 'Спряна', planId: 'standard', planUntil: '2027-01-31' } })).status, 200);
   const res = await call('GET', '/api/data', { as: 'admin@x.bg' });
-  assert.equal(res.status, 403);
-  assert.match(res.data.error.message, /спрян/);
+  assert.equal(res.status, 200);
+  assert.equal(res.data.readOnly, true);
+  assert.match(res.data.readOnlyReason, /спрян/);
+  assert.ok(res.data.companies.some((c) => c.id === 'CO-1'));
+  const attempts = [
+    ['POST', '/api/data/companies', { name: 'Нов', relation: 'Клиент' }],
+    ['PATCH', '/api/data/companies/CO-1', { city: 'Бургас' }],
+    ['DELETE', '/api/data/companies/CO-1', undefined],
+    ['POST', '/api/documents', { docType: 'Фактура', companyId: 'CO-1', lines: [{ name: 'Услуга', qty: 1, price: 10, vatRate: 20 }] }],
+  ];
+  for (const [method, path, body] of attempts) {
+    const r = await call(method, path, { as: 'admin@x.bg', body });
+    assert.equal(r.status, 403, `${method} ${path}`);
+    assert.match(r.data.error.message, /спрян/);
+  }
+  const [company] = await store.forSite(siteOf('ORG-A')).find('companies', 'id', 'CO-1');
+  assert.equal(company.city, 'Варна');
   const overview = await call('GET', '/api/platform', { as: 'staff@buladmin.eu' });
   const org = overview.data.orgs.find((o) => o.id === 'ORG-A');
   assert.deepEqual([org.status, org.planId, org.planUntil], ['Спряна', 'standard', '2027-01-31']);
@@ -192,7 +207,7 @@ test('фактура: издаване, наличност, плащане, кр
   const id = draft.data.id;
   const issued = await call('POST', `/api/documents/${id}/issue`, { as: 'user@x.bg' });
   assert.equal(issued.data.number, '0000000001');
-  assert.equal((await store.find('products', 'id', 'PR-2'))[0].stock, 47);
+  assert.equal((await store.forSite(siteOf('ORG-A')).find('products', 'id', 'PR-2'))[0].stock, 47);
   // PDF се създава наново в браузъра всеки път; адресът за архив вече не съществува.
   assert.equal((await call('PUT', `/api/documents/${id}/pdf`, { as: 'user@x.bg', raw: new TextEncoder().encode('%PDF-1.7'), type: 'application/pdf' })).status, 404);
   assert.equal(store.files.size, 0);
@@ -202,7 +217,7 @@ test('фактура: издаване, наличност, плащане, кр
   const credit = await call('POST', `/api/documents/${id}/derive`, { as: 'user@x.bg', body: { docType: 'Кредитно известие' } });
   const creditIssued = await call('POST', `/api/documents/${credit.data.id}/issue`, { as: 'user@x.bg' });
   assert.equal(creditIssued.data.number, '0000000002');
-  assert.equal((await store.find('products', 'id', 'PR-2'))[0].stock, 50);
+  assert.equal((await store.forSite(siteOf('ORG-A')).find('products', 'id', 'PR-2'))[0].stock, 50);
 });
 
 test('без данни на фирмата не се издава документ', async () => {
@@ -305,8 +320,12 @@ test('втора фирма в профила: само с платен план
   assert.equal(created.data.status, 'Чака плащане');
   const [org] = await store.find('orgs', 'id', created.data.id);
   assert.deepEqual([org.planId, org.paidOnly], ['standard', 'Да']);
-  // Докато не е платена, фирмата не се отваря, а /api/me показва статуса.
-  const blocked = await call('GET', '/api/data', { as: 'admin@x.bg', org: created.data.id });
+  // Докато не е платена, фирмата е само за четене, а /api/me показва статуса.
+  const view = await call('GET', '/api/data', { as: 'admin@x.bg', org: created.data.id });
+  assert.equal(view.status, 200);
+  assert.equal(view.data.readOnly, true);
+  assert.match(view.data.readOnlyReason, /платен абонамент „Стандартен“/);
+  const blocked = await call('POST', '/api/data/companies', { as: 'admin@x.bg', org: created.data.id, body: { name: 'Нов', relation: 'Клиент' } });
   assert.equal(blocked.status, 402);
   assert.match(blocked.data.error.message, /платен абонамент „Стандартен“/);
   assert.equal((await call('GET', '/api/me', { as: 'admin@x.bg' })).data.orgs.find((o) => o.id === created.data.id).status, 'Чака плащане');
@@ -321,8 +340,12 @@ test('изтекъл абонамент на втора фирма не пада
     orgs: [{ id: 'ORG-A', ...COMPANY, planId: 'standard', planUntil: '2026-11-01', paidOnly: 'Да', orgStatus: 'Активна' }],
   });
   const res = await call('GET', '/api/data', { as: 'admin@x.bg' });
-  assert.equal(res.status, 402);
-  assert.match(res.data.error.message, /изтекъл/);
+  assert.equal(res.status, 200);
+  assert.equal(res.data.readOnly, true);
+  assert.match(res.data.readOnlyReason, /изтекъл/);
+  const write = await call('PATCH', '/api/data/companies/CO-1', { as: 'admin@x.bg', body: { city: 'Бургас' } });
+  assert.equal(write.status, 402);
+  assert.match(write.data.error.message, /изтекъл/);
 });
 
 test('първата фирма в профила е безплатна', async () => {

@@ -24,17 +24,41 @@ function fromGraphValue(kind, value) {
   return value;
 }
 
+// Колона от schema.json като дефиниция на колона в SharePoint (за създаване на таблици).
+export function columnDefinition(c) {
+  const base = { name: c.name, displayName: c.label, indexed: !!c.indexed };
+  if (c.kind === 'date') return { ...base, dateTime: { format: 'dateTime' } };
+  if (c.kind === 'day') return { ...base, dateTime: { format: 'dateOnly' } };
+  if (c.kind === 'number') return { ...base, number: { decimalPlaces: 'automatic' } };
+  if (c.kind === 'choice') return { ...base, choice: { choices: c.choices, displayAs: 'dropDownMenu' } };
+  if (c.kind === 'multiline') return { ...base, text: { allowMultipleLines: true, linesForEditing: 6 } };
+  return { ...base, text: {} };
+}
+
 // Пази данните в Microsoft Lists. Записите имат `id` (колоната Title) и колоните от schema.json.
+// Централният сайт (SP_SITE_PATH) пази фирмите, плановете и потребителите; всяка фирма има свой сайт
+// с нейните данни — forSite() връща хранилище за този сайт със същия токен.
 export class GraphStore {
-  constructor(env, fetchImpl = (...args) => fetch(...args)) {
+  constructor(env, fetchImpl = (...args) => fetch(...args), { sitePath = env.SP_SITE_PATH, parent = null } = {}) {
     this.env = env;
     this.fetch = fetchImpl;
+    this.sitePath = sitePath;
+    this.parent = parent;
+    this.sites = new Map();
     this.token = null;
     this.tokenExpiry = 0;
     this.itemIds = new Map();
   }
 
+  forSite(sitePath) {
+    const root = this.parent || this;
+    if (!sitePath || sitePath === root.sitePath) return root;
+    if (!root.sites.has(sitePath)) root.sites.set(sitePath, new GraphStore(this.env, this.fetch, { sitePath, parent: root }));
+    return root.sites.get(sitePath);
+  }
+
   async accessToken() {
+    if (this.parent) return this.parent.accessToken();
     if (this.token && Date.now() < this.tokenExpiry) return this.token;
     const tokenUrl = `https://login.microsoftonline.com/${this.env.GRAPH_TENANT_ID}/oauth2/v2.0/token`;
     const res = await this.fetch(tokenUrl, {
@@ -77,9 +101,97 @@ export class GraphStore {
     }
   }
 
+  siteRef() {
+    return `${this.env.SP_HOSTNAME}:${this.sitePath}:`;
+  }
+
   itemsUrl(table) {
-    const site = `${this.env.SP_HOSTNAME}:${this.env.SP_SITE_PATH}:`;
-    return `${GRAPH}/sites/${site}/lists/${encodeURIComponent(schema[table].title)}/items`;
+    return `${GRAPH}/sites/${this.siteRef()}/lists/${encodeURIComponent(schema[table].title)}/items`;
+  }
+
+  // --- Сайтове на фирмите ---
+
+  // Токен за SharePoint REST: Graph още няма стабилен начин приложение да създава сайтове.
+  async sharePointToken() {
+    const root = this.parent || this;
+    if (root.spToken && Date.now() < root.spTokenExpiry) return root.spToken;
+    const tokenUrl = `https://login.microsoftonline.com/${this.env.GRAPH_TENANT_ID}/oauth2/v2.0/token`;
+    const res = await this.fetch(tokenUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: this.env.MS_CLIENT_ID,
+        client_assertion_type: CLIENT_ASSERTION_TYPE,
+        client_assertion: await clientAssertion(this.env, tokenUrl),
+        scope: `https://${this.env.SP_HOSTNAME}/.default`,
+      }),
+    });
+    if (!res.ok) throw new Error(`SharePoint token request failed: ${res.status}`);
+    const data = await res.json();
+    root.spToken = data.access_token;
+    root.spTokenExpiry = Date.now() + (data.expires_in - 120) * 1000;
+    return root.spToken;
+  }
+
+  async spRequest(path, init = {}) {
+    const res = await this.fetch(`https://${this.env.SP_HOSTNAME}${path}`, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${await this.sharePointToken()}`,
+        accept: 'application/json;odata=nometadata',
+        'content-type': 'application/json;odata=nometadata',
+        ...init.headers,
+      },
+    });
+    if (!res.ok) throw new Error(`SharePoint ${init.method || 'GET'} ${path.split('?')[0]} failed: ${res.status}`);
+    return res.status === 204 ? null : res.json();
+  }
+
+  // Състояние на сайт: 'missing', 'provisioning', 'ready' или 'error'.
+  async siteStatus(sitePath) {
+    const url = `https://${this.env.SP_HOSTNAME}${sitePath}`;
+    const res = await this.spRequest(`/_api/SPSiteManager/status?url='${encodeURIComponent(url)}'`);
+    return { 0: 'missing', 1: 'provisioning', 2: 'ready', 3: 'error' }[res?.SiteStatus] || 'missing';
+  }
+
+  // Създава екипен сайт без Microsoft 365 група и без външно споделяне.
+  async createSite({ sitePath, title, owner }) {
+    const status = await this.siteStatus(sitePath);
+    if (status !== 'missing') return status;
+    const res = await this.spRequest('/_api/SPSiteManager/create', {
+      method: 'POST',
+      body: JSON.stringify({
+        request: { Title: title, Url: `https://${this.env.SP_HOSTNAME}${sitePath}`, Lcid: 1026, WebTemplate: 'STS#3', Owner: owner, ShareByEmailEnabled: false },
+      }),
+    });
+    return res?.SiteStatus === 2 ? 'ready' : 'provisioning';
+  }
+
+  // Създава липсващите таблици в сайта на фирмата; на едно извикване — до limit таблици, за да не се бави заявката.
+  async ensureLists(tables, limit = 4) {
+    const site = await this.request(`${GRAPH}/sites/${this.siteRef()}?$select=id`);
+    const existing = (await this.request(`${GRAPH}/sites/${site.id}/lists?$select=id,displayName&$top=200`)).value;
+    let created = 0;
+    for (const table of tables) {
+      const def = schema[table];
+      if (existing.some((l) => l.displayName === def.title)) continue;
+      if (created >= limit) return { done: false, siteId: site.id };
+      const list = await this.request(`${GRAPH}/sites/${site.id}/lists`, {
+        method: 'POST',
+        body: JSON.stringify({ displayName: def.title, list: { template: 'genericList' }, columns: def.columns.map(columnDefinition) }),
+      });
+      // Колоната Title пази уникалния номер: индексира се, за да може да се търси по нея.
+      const { value: cols } = await this.request(`${GRAPH}/sites/${site.id}/lists/${list.id}/columns?$select=id,name`);
+      const titleCol = cols.find((c) => c.name === 'Title');
+      if (titleCol) {
+        await this.request(`${GRAPH}/sites/${site.id}/lists/${list.id}/columns/${titleCol.id}`, {
+          method: 'PATCH', body: JSON.stringify({ indexed: true, displayName: def.titleLabel }),
+        });
+      }
+      created += 1;
+    }
+    return { done: true, siteId: site.id };
   }
 
   toRecord(table, item) {
@@ -160,7 +272,7 @@ export class GraphStore {
   // Адресът на сайта с „:“ не може да се комбинира с път на файл с „:“, затова се взима ID на библиотеката.
   async driveUrl() {
     if (!this.driveId) {
-      const drive = await this.request(`${GRAPH}/sites/${this.env.SP_HOSTNAME}:${this.env.SP_SITE_PATH}:/drive?$select=id`);
+      const drive = await this.request(`${GRAPH}/sites/${this.siteRef()}/drive?$select=id`);
       this.driveId = drive.id;
     }
     return `${GRAPH}/drives/${this.driveId}`;
@@ -226,12 +338,24 @@ export class GraphStore {
 
 // За тестове и локална разработка; не се използва в production.
 export class MemoryStore {
-  constructor(seed = {}) {
+  constructor(seed = {}, root = null) {
     this.tables = Object.fromEntries(Object.keys(schema).map((key) => [key, []]));
     Object.assign(this.tables, structuredClone(seed));
-    this.sentMail = [];
+    this.root = root;
+    this.sites = new Map();
+    this.sentMail = root ? root.sentMail : [];
     this.files = new Map();
   }
+  // Всеки сайт е отделно хранилище в паметта, както отделните сайтове в SharePoint.
+  forSite(sitePath) {
+    const root = this.root || this;
+    if (!sitePath) return root;
+    if (!root.sites.has(sitePath)) root.sites.set(sitePath, new MemoryStore({}, root));
+    return root.sites.get(sitePath);
+  }
+  async siteStatus(sitePath) { return (this.root || this).sites.has(sitePath) ? 'ready' : 'missing'; }
+  async createSite({ sitePath }) { this.forSite(sitePath); return 'ready'; }
+  async ensureLists() { return { done: true, siteId: 'memory' }; }
   async uploadFile(path, bytes, contentType) {
     const existing = [...this.files].find(([, f]) => f.path === path);
     const id = existing ? existing[0] : `item-${this.files.size + 1}`;

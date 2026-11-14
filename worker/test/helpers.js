@@ -11,13 +11,17 @@ export const COMPANY = {
 export const member = (orgId, userId, role) => ({ id: `${orgId}:${userId}`, orgId, userId, role, isActive: 'Да' });
 export const user = (id, extra = {}) => ({ id, fullName: id.split('@')[0], isActive: 'Да', sessionVersion: '0', ...extra });
 
+// Таблиците с данни на фирма: в тестовете те отиват в сайта на съответната фирма, както в SharePoint.
+const ORG_TABLES = ['companies', 'contacts', 'deals', 'activities', 'tenders', 'products', 'documents', 'payments', 'audit'];
+export const siteOf = (orgId) => `/sites/cloud-${orgId.toLowerCase()}`;
+
 export function setup(seed = {}, { plan = 'pro', mail = false, fetchImpl, at = '2026-11-14T10:00:00Z' } = {}) {
-  const store = new MemoryStore({
+  const all = {
     users: [user('admin@x.bg'), user('user@x.bg'), user('viewer@x.bg'), user('other@y.bg', { googleId: 'google:o' }), user('off@x.bg', { isActive: 'Не' }),
       user('staff@buladmin.eu', { platformRole: 'Администратор на БУЛАДМИН' })],
     orgs: [
-      { id: 'ORG-A', ...COMPANY, planId: plan, orgStatus: 'Активна' },
-      { id: 'ORG-B', ...COMPANY, name: 'Друга ООД', eik: '831641791', vatNumber: 'BG831641791', planId: 'free', orgStatus: 'Активна' },
+      { id: 'ORG-A', ...COMPANY, planId: plan, orgStatus: 'Активна', sitePath: siteOf('ORG-A'), dbStatus: 'Готова' },
+      { id: 'ORG-B', ...COMPANY, name: 'Друга ООД', eik: '831641791', vatNumber: 'BG831641791', planId: 'free', orgStatus: 'Активна', sitePath: siteOf('ORG-B'), dbStatus: 'Готова' },
     ],
     members: [member('ORG-A', 'admin@x.bg', 'Администратор'), member('ORG-A', 'user@x.bg', 'Потребител'), member('ORG-A', 'viewer@x.bg', 'Наблюдател'),
       member('ORG-B', 'other@y.bg', 'Администратор'), member('ORG-A', 'off@x.bg', 'Потребител')],
@@ -30,7 +34,17 @@ export function setup(seed = {}, { plan = 'pro', mail = false, fetchImpl, at = '
       { id: 'PR-2', orgId: 'ORG-A', name: 'Стока', itemType: 'Стока', unit: 'бр.', price: 10, vatRate: '20', stock: 50, isActive: 'Да' },
     ],
     ...seed,
-  });
+  };
+  // Фирмите от seed без сайт се допълват със сайт, освен ако тестът изрично не е задал друго.
+  all.orgs = all.orgs.map((o) => (Object.hasOwn(o, 'sitePath') ? o : { ...o, sitePath: siteOf(o.id), dbStatus: 'Готова' }));
+  const central = Object.fromEntries(Object.entries(all).filter(([table]) => !ORG_TABLES.includes(table)));
+  const store = new MemoryStore(central);
+  for (const table of ORG_TABLES) {
+    for (const row of all[table] || []) {
+      const org = all.orgs.find((o) => o.id === row.orgId);
+      store.forSite(org?.sitePath || '').tables[table].push(structuredClone(row));
+    }
+  }
   const app = createApp({
     env: { ...env, MAIL_ENABLED: mail ? 'true' : 'false', MAIL_FROM: 'no-reply@cloud.example' }, store, now: () => new Date(at), ...(fetchImpl && { fetchImpl }),
   });

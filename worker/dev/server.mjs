@@ -105,13 +105,13 @@ seed.users = seed.users.map(({ role, ...u }) => u);
 seed.users[0].platformRole = 'Администратор на БУЛАДМИН';
 seed.orgs = [
   {
-    id: ORG, ...company, planId: 'eop', orgStatus: 'Активна', createdBy: 'admin@buladmin.eu', createdAt: at(60), updatedAt: at(60),
+    id: ORG, ...company, planId: 'eop', orgStatus: 'Активна', sitePath: '/sites/cloud-org-demo0001', dbStatus: 'Готова', createdBy: 'admin@buladmin.eu', createdAt: at(60), updatedAt: at(60),
     bankAccounts: JSON.stringify([
       { iban: company.iban, bic: company.bic, bank: company.bank, currency: 'EUR', label: 'Основна' },
       { iban: 'BG18RZBB91550123456789', bic: 'RZBBBGSF', bank: 'Демо банка 2', currency: 'USD', label: 'Доларова' },
     ]),
   },
-  { id: 'ORG-DEMO0002', ...company, name: 'Втора фирма ЕООД', eik: '202020204', vatRegistered: 'Не', vatNumber: '', planId: 'free', orgStatus: 'Активна', createdBy: 'admin@buladmin.eu', createdAt: at(5), updatedAt: at(5) },
+  { id: 'ORG-DEMO0002', ...company, name: 'Втора фирма ЕООД', eik: '202020204', vatRegistered: 'Не', vatNumber: '', planId: 'free', orgStatus: 'Активна', sitePath: '/sites/cloud-org-demo0002', dbStatus: 'Готова', createdBy: 'admin@buladmin.eu', createdAt: at(5), updatedAt: at(5) },
 ];
 const member = (orgId, userId, role) => ({ id: `${orgId}:${userId}`, orgId, userId, role, isActive: 'Да', createdAt: at(30) });
 seed.members = [
@@ -119,7 +119,7 @@ seed.members = [
   member(ORG, 'viewer@buladmin.eu', 'Наблюдател'), member(ORG, 'nov@buladmin.eu', 'Потребител'),
   member('ORG-DEMO0002', 'admin@buladmin.eu', 'Администратор'), member('ORG-DEMO0002', 'sales@buladmin.eu', 'Администратор'),
 ];
-const inDays = (d, hour) => { const x = new Date(Date.now() + d * 864e5); x.setUTCHours(hour, 0, 0, 0); return x.toISOString().replace(/.d+Z$/, 'Z'); };
+const inDays = (d, hour) => { const x = new Date(Date.now() + d * 864e5); x.setUTCHours(hour, 0, 0, 0); return x.toISOString().replace(/\.\d+Z$/, 'Z'); };
 seed.tenders = [
   {
     id: 'TN-DEMO0001', orgId: ORG, tenderName: 'Счетоводно обслужване на общинско предприятие', eopNumber: '00123-2026-0045', authority: 'Община Пример',
@@ -129,7 +129,27 @@ seed.tenders = [
     checklist: JSON.stringify(defaultChecklist()),
   },
 ];
-const store = new MemoryStore(seed);
+// Както в SharePoint: профилите и фирмите са в общия сайт, а данните на всяка фирма — в нейния сайт.
+const ORG_TABLES = ['companies', 'contacts', 'deals', 'activities', 'tenders', 'products', 'documents', 'payments', 'audit'];
+const store = new MemoryStore(Object.fromEntries(Object.entries(seed).filter(([table]) => !ORG_TABLES.includes(table))));
+for (const table of ORG_TABLES) {
+  for (const row of seed[table] || []) store.forSite(seed.orgs.find((o) => o.id === row.orgId).sitePath).tables[table].push(row);
+}
+// Новият сайт се „създава“ за около 8 секунди, за да се вижда екранът за подготовка на базата.
+const creating = new Map();
+const memorySiteStatus = store.siteStatus.bind(store);
+store.siteStatus = async (sitePath) => {
+  if (creating.has(sitePath)) {
+    if (Date.now() - creating.get(sitePath) < 8000) return 'provisioning';
+    creating.delete(sitePath);
+    store.forSite(sitePath);
+  }
+  return memorySiteStatus(sitePath);
+};
+store.createSite = async ({ sitePath }) => {
+  if (!creating.has(sitePath) && (await memorySiteStatus(sitePath)) === 'missing') creating.set(sitePath, Date.now());
+  return store.siteStatus(sitePath);
+};
 const app = createApp({ env, store });
 
 const devUsers = { admin: 'admin@buladmin.eu', user: 'sales@buladmin.eu', viewer: 'viewer@buladmin.eu' };

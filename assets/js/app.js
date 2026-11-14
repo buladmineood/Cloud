@@ -1,8 +1,8 @@
 import {
   api, confirmDialog, downloadCsv, emptyState, fatal, field, formatDate, formatTime, formDialog, formValues, h, icon, linkBox,
   money, mountShell, norm, num, pageHead, parseNum, pill, round2, selectField, setOrg, showError, showFieldErrors, timeAgo, toast, today,
-} from './core.js?v=bf08f3b745';
-import { buildPdf, saveFile } from './pdf.js?v=bf08f3b745';
+} from './core.js?v=300b380863';
+import { buildPdf, saveFile } from './pdf.js?v=300b380863';
 
 let shell;
 let main;
@@ -22,7 +22,8 @@ const PAYMENT_METHODS = ['Банков превод', 'В брой', 'С кар�
 
 const role = () => data?.role || '';
 const isAdmin = () => role() === 'Администратор';
-const canEdit = () => !!data && role() !== 'Наблюдател';
+// Спряна или неплатена фирма е само за преглед: данните се виждат и изтеглят, но не се въвеждат нови.
+const canEdit = () => !!data && !data.readOnly && role() !== 'Наблюдател';
 const isPlatform = () => me.user.platformRole === PLATFORM_ADMIN;
 const limitText = (key) => {
   const limit = data.plan[key];
@@ -46,8 +47,14 @@ const refLink = (entity, id) => {
   return record ? h('a', { href: `#/${entity}/${id}` }, titleOf(entity, record)) : (id ? h('span', { class: 'muted' }, 'изтрит запис') : '');
 };
 
+function readOnlyBanner() {
+  if (!data?.readOnly) return null;
+  return h('div', { class: 'alert alert--warn', role: 'status' }, h('strong', {}, 'Само за преглед. '), data.readOnlyReason,
+    isAdmin() && h('span', {}, ' ', h('a', { href: 'mailto:call@buladmin.eu' }, 'Пишете на БУЛАДМИН')));
+}
+
 function page(...children) {
-  main.replaceChildren(h('div', { class: 'page page--wide' }, children));
+  main.replaceChildren(h('div', { class: 'page page--wide' }, readOnlyBanner(), children));
   main.focus({ preventScroll: true });
 }
 const loading = () => main.replaceChildren(h('div', { class: 'loading' }, 'Зареждане…'));
@@ -1642,7 +1649,7 @@ async function viewPlatformOrgs(query) {
       h('tbody', {}, rows.map((o) => {
         const href = `#/platform/orgs/${o.id}`;
         const tr = h('tr', { 'data-href': href, class: o.status === 'Спряна' ? 'is-muted' : '' },
-          h('td', { 'data-label': 'Организация' }, h('a', { href }, o.name), o.status === 'Спряна' && h('div', { class: 'small text-error' }, 'спряна'), o.status === 'Чака плащане' && h('div', { class: 'small text-warn' }, 'чака плащане')),
+          h('td', { 'data-label': 'Организация' }, h('a', { href }, o.name), o.status === 'Спряна' && h('div', { class: 'small text-error' }, 'спряна'), o.status === 'Чака плащане' && h('div', { class: 'small text-warn' }, 'чака плащане'), o.dbStatus && !['Готова', 'Обща'].includes(o.dbStatus) && h('div', { class: 'small text-warn' }, `база: ${o.dbStatus.toLowerCase()}`)),
           h('td', { 'data-label': 'ЕИК' }, o.eik),
           h('td', { 'data-label': 'План' }, planName(o.effectivePlan), o.planUntil && h('div', { class: 'small muted' }, `до ${formatDate(o.planUntil)}`)),
           h('td', { 'data-label': 'Администратори' }, o.members.filter((m) => m.role === 'Администратор' && m.isActive === 'Да').map((m) => m.email).join(', ')),
@@ -1666,7 +1673,7 @@ async function viewPlatformOrg(id) {
       selectField({ name: 'paidOnly', label: 'Само с платен план', options: [['Не', 'Не (може да е безплатна)'], ['Да', 'Да (не е първата фирма в профил)']], value: o.paidOnly ? 'Да' : 'Не' }),
       h('div', { class: 'field full' }, h('label', { for: 'f-adminNotes' }, 'Бележки на БУЛАДМИН', h('span', { class: 'field__hint' }, ' (виждат ги само администраторите на БУЛАДМИН)')),
         h('textarea', { id: 'f-adminNotes', name: 'adminNotes', rows: 3, maxlength: 8000 }, o.adminNotes))),
-    h('p', { class: 'small muted' }, 'След датата „Платен до“ организацията минава автоматично на плана по подразбиране. Спряната организация не е достъпна за хората в нея.'),
+    h('p', { class: 'small muted' }, 'Спряната или неплатена организация е само за преглед: хората в нея виждат и изтеглят данните си, но не могат да въвеждат нови. След „Платен до“ втора фирма в профил чака плащане, а първата минава на плана по подразбиране.'),
     alert,
     h('div', {}, h('button', { class: 'btn', type: 'submit' }, 'Запазете')));
   form.addEventListener('submit', async (event) => {
@@ -1717,11 +1724,29 @@ async function viewPlatformOrg(id) {
           h('h2', { class: 'card__title' }, 'Използване'),
           h('p', { class: 'small' }, usageSummary(o)),
           h('p', { class: 'small muted' }, `Лого: ${o.hasLogo ? 'качено' : 'няма'}`)),
+        dbCard(o),
         h('section', { class: 'card' }, h('h2', { class: 'card__title' }, 'Данни на фирмата'),
           h('dl', { class: 'details details--stacked' },
             [['ДДС', o.vatRegistered === 'Да' ? o.vatNumber : 'не е регистрирана'], ['МОЛ', o.mol], ['Адрес', [o.city, o.address].filter(Boolean).join(', ')], ['Телефон', o.phone], ['Имейл', o.email]]
               .filter(([, v]) => v).flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]))),
         await historyCardFor('orgs', id))));
+}
+
+// Отделната база данни (SharePoint сайт) на организацията.
+function dbCard(o) {
+  const shared = o.dbStatus === 'Обща';
+  const retry = async () => {
+    const res = await act(() => api(`/orgs/${encodeURIComponent(o.id)}/provision`, { method: 'POST' }));
+    if (res) { toast(res.dbStatus === 'Готова' ? 'Базата данни е готова.' : 'Подготовката продължава. Проверете след минута.'); viewPlatformOrg(o.id); }
+  };
+  return h('section', { class: 'card stack-tight' },
+    h('h2', { class: 'card__title' }, 'База данни'),
+    shared
+      ? h('p', { class: 'small' }, 'В общия сайт на cloud (регистрирана преди отделните бази). Преместете я със scripts/migrate-org-sites.mjs.')
+      : h('p', { class: 'small' }, h('span', { class: o.dbStatus === 'Готова' ? 'tag' : 'tag tag--warn' }, o.dbStatus), ' ',
+        o.siteUrl ? h('a', { href: o.siteUrl, target: '_blank', rel: 'noopener' }, o.sitePath) : o.sitePath),
+    o.dbError && h('p', { class: 'small text-error' }, o.dbError),
+    !shared && o.dbStatus !== 'Готова' && h('div', {}, h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: retry }, 'Подгответе базата отново')));
 }
 
 // Историята на организация се вижда от БУЛАДМИН, затова се чете в контекста на самата организация.
@@ -1830,6 +1855,44 @@ async function viewPlatformUsers(query) {
           }, u.isActive === 'Да' ? 'Блокирайте' : 'Отблокирайте')))))))));
 }
 
+// --- Подготовка на отделната база данни (SharePoint сайт) на нова фирма ---
+
+let provisionTimer = 0;
+function viewProvisioning() {
+  const status = h('p', { class: 'small muted', 'aria-live': 'polite' }, 'Създаваме отделен защитен сайт в Microsoft 365 за данните на фирмата. Обикновено отнема до минута.');
+  const bar = h('div', { class: 'progress', role: 'progressbar', 'aria-label': 'Подготовка на базата данни' }, h('span', {}));
+  page(h('section', { class: 'card stack narrow-card' },
+    h('h1', {}, 'Подготвяме базата данни'),
+    h('p', {}, 'Данните на всяка фирма се пазят в отделна база (SharePoint сайт), до която имат достъп само хората във фирмата.'),
+    bar, status));
+  const id = orgId;
+  let step = 0;
+  const tick = async () => {
+    // Спира, ако потребителят е избрал друга фирма или е напуснал екрана.
+    if (orgId !== id || !status.isConnected) return;
+    try {
+      const res = await api(`/orgs/${encodeURIComponent(id)}/provision`, { method: 'POST' });
+      if (res.dbStatus === 'Готова') {
+        toast('Базата данни е готова.');
+        await selectOrg(id, me.orgs.find((o) => o.id === id)?.status === 'Чака плащане' ? '#/' : '#/settings');
+        return;
+      }
+      if (res.dbStatus === 'Грешка') {
+        fill(status, h('span', { class: 'text-error' }, 'Базата данни не беше създадена. Администраторите на БУЛАДМИН са уведомени и ще се свържат с Вас.'));
+        bar.remove();
+        return;
+      }
+      step += 1;
+      fill(status, res.step === 'lists' ? 'Сайтът е създаден, добавяме таблиците…' : `Създаваме сайта… (${step * 5} сек.)`);
+    } catch (err) {
+      fill(status, h('span', { class: 'text-error' }, err.message));
+    }
+    clearTimeout(provisionTimer);
+    provisionTimer = setTimeout(tick, 5000);
+  };
+  tick();
+}
+
 // --- Избор на организация и маршрути ---
 
 let orgError = '';
@@ -1857,7 +1920,7 @@ function switcher() {
   if (!me.orgs.length && !isPlatform()) return null;
   const select = h('select', { id: 'org-switch', class: 'org-switch__select', 'aria-label': 'Организация' },
     !me.orgs.some((o) => o.id === orgId) && h('option', { value: orgId, selected: true }, data?.org.name || (orgId ? 'Организация' : 'Изберете организация')),
-    me.orgs.map((o) => h('option', { value: o.id, selected: o.id === orgId }, o.status === 'Активна' ? o.name : `${o.name} (${o.status.toLowerCase()})`)),
+    me.orgs.map((o) => h('option', { value: o.id, selected: o.id === orgId }, o.dbStatus && o.dbStatus !== 'Готова' ? `${o.name} (подготвя се)` : (o.status === 'Активна' ? o.name : `${o.name} (${o.status.toLowerCase()})`))),
     h('option', { value: '__new' }, '+ Нова фирма'));
   select.addEventListener('change', () => {
     if (select.value === '__new') {
@@ -1910,6 +1973,7 @@ async function route() {
       if (id === 'users') return await viewPlatformUsers(query);
     }
     if (!data) {
+      if (orgErrorStatus === 409) return viewProvisioning();
       if (orgError) {
         return page(emptyState(orgErrorStatus === 402 ? 'wallet' : 'alert', orgErrorStatus === 402 ? 'Фирмата чака плащане на абонамент' : 'Няма достъп до организацията', orgError,
           h('div', { class: 'row' }, h('a', { class: 'btn', href: 'mailto:call@buladmin.eu' }, 'Пишете на БУЛАДМИН'), h('a', { class: 'btn btn--ghost', href: '#/me' }, 'Към профила'))));

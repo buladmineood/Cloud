@@ -1,7 +1,9 @@
 // Настройва Microsoft 365 за cloud.buladmin.eu наведнъж. Администратор влиза с код в браузъра, след което скриптът:
 //   1. създава (или намира) отделно приложение „BULADMIN Cloud“ в Entra със сертификата от .secrets/buladmin-cloud.cer
 //      и адреса за вход; записва неговия Application ID в wrangler.toml (MS_CLIENT_ID);
-//   2. одобрява за цялата организация входа (openid, email, profile) и правото Sites.Selected;
+//   2. одобрява за цялата организация входа (openid, email, profile) и правата за SharePoint:
+//      Graph Sites.Manage.All (таблиците във всички сайтове на cloud) и SharePoint Sites.FullControl.All
+//      (автоматично създаване на отделен сайт за всяка нова фирма);
 //   3. добавя домейна cloud.buladmin.eu в tenant-а и показва DNS записите, които трябват;
 //   4. дава на приложението достъп само до SharePoint сайта от SP_SITE_PATH (временно manage);
 //   5. пуска provision.mjs (таблици и първи администратор);
@@ -16,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 // Публичното приложение на Microsoft за Graph от командния ред; достъпът е този на влезлия администратор.
 const GRAPH_CLI_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e';
 const GRAPH_APP_ID = '00000003-0000-0000-c000-000000000000';
+const SHAREPOINT_APP_ID = '00000003-0000-0ff1-ce00-000000000000';
 const SCOPES = [
   'Application.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All',
   'Sites.FullControl.All', 'Domain.ReadWrite.All',
@@ -88,19 +91,34 @@ async function graph(path, method = 'GET', body) {
 
 // 1. Отделно приложение за cloud
 const graphSp = await graph(`/servicePrincipals(appId='${GRAPH_APP_ID}')?$select=id,appRoles,oauth2PermissionScopes`);
-const sitesSelected = graphSp.appRoles.find((r) => r.value === 'Sites.Selected');
+const sharePointSp = await graph(`/servicePrincipals(appId='${SHAREPOINT_APP_ID}')?$select=id,appRoles`);
+const roleOf = (sp, value) => sp.appRoles.find((r) => r.value === value);
+// Всяка фирма има собствен сайт /sites/cloud-<id>, който Worker-ът създава сам, затова правата са за целия SharePoint.
+const appRoles = [
+  { sp: graphSp, role: roleOf(graphSp, 'Sites.Selected') },
+  { sp: graphSp, role: roleOf(graphSp, 'Sites.Manage.All') },
+  { sp: sharePointSp, role: roleOf(sharePointSp, 'Sites.FullControl.All') },
+];
 const delegated = ['openid', 'email', 'profile'].map((value) => graphSp.oauth2PermissionScopes.find((s) => s.value === value));
-const requiredResourceAccess = [{
-  resourceAppId: GRAPH_APP_ID,
-  resourceAccess: [{ id: sitesSelected.id, type: 'Role' }, ...delegated.map((s) => ({ id: s.id, type: 'Scope' }))],
-}];
+const requiredResourceAccess = [
+  {
+    resourceAppId: GRAPH_APP_ID,
+    resourceAccess: [...appRoles.filter((r) => r.sp === graphSp).map((r) => ({ id: r.role.id, type: 'Role' })), ...delegated.map((s) => ({ id: s.id, type: 'Scope' }))],
+  },
+  { resourceAppId: SHAREPOINT_APP_ID, resourceAccess: appRoles.filter((r) => r.sp === sharePointSp).map((r) => ({ id: r.role.id, type: 'Role' })) },
+];
 
-let [app] = (await graph(`/applications?$filter=displayName eq '${APP_NAME}'&$select=id,appId,web,keyCredentials`)).value;
+let [app] = (await graph(`/applications?$filter=displayName eq '${APP_NAME}'&$select=id,appId,web,keyCredentials,requiredResourceAccess`)).value;
 if (app) {
   console.log(`1. Приложението „${APP_NAME}“ съществува: ${app.appId}`);
   if (!app.web?.redirectUris?.includes(callback)) {
     await graph(`/applications/${app.id}`, 'PATCH', { web: { redirectUris: [...(app.web?.redirectUris || []), callback] } });
     console.log(`   добавен адрес за вход ${callback}`);
+  }
+  const declared = new Set((app.requiredResourceAccess || []).flatMap((r) => r.resourceAccess.map((a) => `${r.resourceAppId}:${a.id}`)));
+  if (requiredResourceAccess.some((r) => r.resourceAccess.some((a) => !declared.has(`${r.resourceAppId}:${a.id}`)))) {
+    await graph(`/applications/${app.id}`, 'PATCH', { requiredResourceAccess });
+    console.log('   обновени са исканите права (SharePoint за всички сайтове на cloud)');
   }
   if (!app.keyCredentials?.length) {
     await graph(`/applications/${app.id}`, 'PATCH', {
@@ -147,11 +165,14 @@ writeFileSync(here('../.secrets/service-principal-id.txt'), appSp.id);
 // 2. Одобрение за организацията. Mail.Send нарочно НЕ се дава тук: в Entra то важи за всички кутии в tenant-а.
 // Изпращането се разрешава само за no-reply@cloud.buladmin.eu през Exchange RBAC със scripts/setup-mail.ps1.
 const assignments = (await graph(`/servicePrincipals/${appSp.id}/appRoleAssignments`)).value;
-if (assignments.some((a) => a.appRoleId === sitesSelected.id && a.resourceId === graphSp.id)) {
-  console.log('2. Sites.Selected вече е одобрено.');
-} else {
-  await graph(`/servicePrincipals/${graphSp.id}/appRoleAssignedTo`, 'POST', { principalId: appSp.id, resourceId: graphSp.id, appRoleId: sitesSelected.id });
-  console.log('2. Sites.Selected е одобрено.');
+for (const { sp, role } of appRoles) {
+  const name = `${sp === graphSp ? 'Graph' : 'SharePoint'} ${role.value}`;
+  if (assignments.some((a) => a.appRoleId === role.id && a.resourceId === sp.id)) {
+    console.log(`2. ${name} вече е одобрено.`);
+  } else {
+    await graph(`/servicePrincipals/${sp.id}/appRoleAssignedTo`, 'POST', { principalId: appSp.id, resourceId: sp.id, appRoleId: role.id });
+    console.log(`2. ${name} е одобрено.`);
+  }
 }
 const grants = (await graph(`/oauth2PermissionGrants?$filter=clientId eq '${appSp.id}'`)).value;
 const grant = grants.find((g) => g.resourceId === graphSp.id && g.consentType === 'AllPrincipals');

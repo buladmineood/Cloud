@@ -9,6 +9,8 @@ routes = [{ pattern = "cloud.buladmin.eu/api/*", zone_name = "buladmin.eu" }]
 APP_ORIGIN = "https://cloud.buladmin.eu"
 SP_HOSTNAME = "bulmaileu.sharepoint.com"
 SP_SITE_PATH = "/sites/cloud"
+# Собственик на автоматично създаваните сайтове на фирмите (/sites/cloud-<id>).
+SP_SITE_OWNER = "cvetkov@bulmail.eu"
 GRAPH_TENANT_ID = "16d24843-7704-4206-87f4-bc20073547ac"
 GOOGLE_CLIENT_ID = "330949049619-gm550u4mq9qtd7gc2tj8bd55cc86g23s.apps.googleusercontent.com"
 MS_CLIENT_ID = "0f8a9dda-96cf-44ef-a92d-34804ad51d18"

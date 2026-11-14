@@ -64,48 +64,64 @@ function columnDefinition(c) {
   return { ...base, text: {} };
 }
 
-const site = await graph(`/sites/${tomlVar('SP_HOSTNAME')}:${tomlVar('SP_SITE_PATH')}`);
-console.log(`Сайт: ${site.webUrl}`);
-const existing = (await graph(`/sites/${site.id}/lists?$select=id,displayName`)).value;
+// Създава липсващите таблици и колони в сайт; връща идентификаторите на таблиците.
+async function syncLists(siteId, tables, verbose = true) {
+  const existing = (await graph(`/sites/${siteId}/lists?$select=id,displayName&$top=200`)).value;
+  const listIds = {};
+  for (const key of tables) {
+    const def = schema[key];
+    let list = existing.find((l) => l.displayName === def.title);
+    if (list) {
+      if (verbose) console.log(`  съществува: ${def.title}`);
+    } else {
+      list = await graph(`/sites/${siteId}/lists`, 'POST', {
+        displayName: def.title,
+        list: { template: 'genericList' },
+        columns: def.columns.map(columnDefinition),
+      });
+      console.log(`  създадена:  ${def.title}`);
+    }
+    listIds[key] = list.id;
 
-const listIds = {};
-for (const [key, def] of Object.entries(schema)) {
-  let list = existing.find((l) => l.displayName === def.title);
-  if (list) {
-    console.log(`  съществува: ${def.title}`);
-  } else {
-    list = await graph(`/sites/${site.id}/lists`, 'POST', {
-      displayName: def.title,
-      list: { template: 'genericList' },
-      columns: def.columns.map(columnDefinition),
-    });
-    console.log(`  създадена:  ${def.title}`);
-  }
-  listIds[key] = list.id;
-
-  // Колоната Title пази уникалния номер: индексира се, за да може да се търси по нея.
-  const { value: columns } = await graph(`/sites/${site.id}/lists/${list.id}/columns?$select=id,name,indexed,displayName,choice`);
-  // Новите колони от schema.json се добавят и към вече създадени таблици, а новите стойности за избор — към съществуващите.
-  for (const column of def.columns) {
-    const current = columns.find((c) => c.name === column.name);
-    if (!current) {
-      await graph(`/sites/${site.id}/lists/${list.id}/columns`, 'POST', columnDefinition(column));
-      console.log(`    нова колона: ${column.label}`);
-    } else if (column.kind === 'choice' && current.choice && column.choices.join('|') !== (current.choice.choices || []).join('|')) {
-      await graph(`/sites/${site.id}/lists/${list.id}/columns/${current.id}`, 'PATCH', { choice: { ...current.choice, choices: column.choices } });
-      console.log(`    нови стойности за „${column.label}“: ${column.choices.join(', ')}`);
+    // Колоната Title пази уникалния номер: индексира се, за да може да се търси по нея.
+    const { value: columns } = await graph(`/sites/${siteId}/lists/${list.id}/columns?$select=id,name,indexed,displayName,choice`);
+    // Новите колони от schema.json се добавят и към вече създадени таблици, а новите стойности за избор — към съществуващите.
+    for (const column of def.columns) {
+      const current = columns.find((c) => c.name === column.name);
+      if (!current) {
+        await graph(`/sites/${siteId}/lists/${list.id}/columns`, 'POST', columnDefinition(column));
+        console.log(`    нова колона: ${column.label}`);
+      } else if (column.kind === 'choice' && current.choice && column.choices.join('|') !== (current.choice.choices || []).join('|')) {
+        await graph(`/sites/${siteId}/lists/${list.id}/columns/${current.id}`, 'PATCH', { choice: { ...current.choice, choices: column.choices } });
+        console.log(`    нови стойности за „${column.label}“: ${column.choices.join(', ')}`);
+      }
+    }
+    // По-рано сделката имаше колона „title“, която SharePoint не позволява (съвпада с вградената Title)
+    // и вместо нея създаваше title0, title1… Тези колони не се използват и се махат.
+    for (const stray of columns.filter((c) => /^title\d+$/.test(c.name) && !def.columns.some((d) => d.name === c.name))) {
+      await graph(`/sites/${siteId}/lists/${list.id}/columns/${stray.id}`, 'DELETE');
+      console.log(`    премахната излишна колона: ${stray.name} (${stray.displayName})`);
+    }
+    const title = columns.find((c) => c.name === 'Title');
+    if (title && (!title.indexed || title.displayName !== def.titleLabel)) {
+      await graph(`/sites/${siteId}/lists/${list.id}/columns/${title.id}`, 'PATCH', { indexed: true, displayName: def.titleLabel });
     }
   }
-  // По-рано сделката имаше колона „title“, която SharePoint не позволява (съвпада с вградената Title)
-  // и вместо нея създаваше title0, title1… Тези колони не се използват и се махат.
-  for (const stray of columns.filter((c) => /^title\d+$/.test(c.name) && !def.columns.some((d) => d.name === c.name))) {
-    await graph(`/sites/${site.id}/lists/${list.id}/columns/${stray.id}`, 'DELETE');
-    console.log(`    премахната излишна колона: ${stray.name} (${stray.displayName})`);
-  }
-  const title = columns.find((c) => c.name === 'Title');
-  if (title && (!title.indexed || title.displayName !== def.titleLabel)) {
-    await graph(`/sites/${site.id}/lists/${list.id}/columns/${title.id}`, 'PATCH', { indexed: true, displayName: def.titleLabel });
-  }
+  return listIds;
+}
+
+// Централният сайт пази профилите, фирмите, плановете и общата история (и данните на фирми без собствен сайт).
+const site = await graph(`/sites/${tomlVar('SP_HOSTNAME')}:${tomlVar('SP_SITE_PATH')}`);
+console.log(`Сайт: ${site.webUrl}`);
+const listIds = await syncLists(site.id, Object.keys(schema));
+
+// Всяка фирма има собствен сайт с нейните данни; там се добавят само новите колони и таблици.
+const ORG_SITE_TABLES = Object.keys(schema).filter((k) => schema[k].generic).concat(['documents', 'payments', 'audit']);
+const { value: orgItems } = await graph(`/sites/${site.id}/lists/${listIds.orgs}/items?expand=fields&$top=999`);
+for (const { fields: org } of orgItems.filter((item) => item.fields.sitePath && item.fields.dbStatus === 'Готова')) {
+  const orgSite = await graph(`/sites/${tomlVar('SP_HOSTNAME')}:${org.sitePath}?$select=id,webUrl`);
+  console.log(`Сайт на ${org.name}: ${orgSite.webUrl}`);
+  await syncLists(orgSite.id, ORG_SITE_TABLES, false);
 }
 
 // Плановете по подразбиране, които още ги няма. След това се променят от системата („БУЛАДМИН“ → „Планове“).

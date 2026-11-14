@@ -274,7 +274,10 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (Object.keys(errors).length) throw new HttpError(422, 'Проверете маркираните полета.', errors);
   };
 
-  const audit = (ctx, entity, recordId, action, summary = '') => store.create('audit', {
+  // Историята на данните на фирмата е в нейния сайт; събитията за фирми, хора и планове — в централния.
+  const CENTRAL_AUDIT = ['users', 'orgs', 'members', 'plans', 'settings'];
+  const auditStore = (ctx, entity) => (ctx.db && !CENTRAL_AUDIT.includes(entity) ? ctx.db : store);
+  const audit = (ctx, entity, recordId, action, summary = '') => auditStore(ctx, entity).create('audit', {
     id: `E-${crypto.randomUUID()}`,
     orgId: ctx.org?.id || '',
     entity,
@@ -303,13 +306,17 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     return plans.sort((a, b) => (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0));
   }
 
-  async function orgUsage(orgId) {
-    const [members, companies, contacts, products, deals, documents, auditRows, orgs] = await Promise.all(
-      ['members', 'companies', 'contacts', 'products', 'deals', 'documents', 'audit'].map((t) => store.find(t, 'orgId', orgId))
-        .concat(store.find('orgs', 'id', orgId)),
+  // Сайтът на фирмата. Фирма без собствен сайт (преди преноса) ползва централния.
+  const orgDb = (org) => store.forSite(org?.sitePath || '');
+  const ORG_SITE_TABLES = Object.keys(schema).filter((k) => schema[k].generic).concat(['documents', 'payments', 'audit']);
+
+  async function orgUsage(org) {
+    const db = orgDb(org);
+    const [members, companies, contacts, products, deals, documents, auditRows] = await Promise.all(
+      [store.find('members', 'orgId', org.id), ...['companies', 'contacts', 'products', 'deals', 'documents', 'audit'].map((t) => db.find(t, 'orgId', org.id))],
     );
     return usageOf({
-      members, companies, contacts, products, deals, documents, audit: auditRows, bankAccounts: orgs[0] ? bankAccountsOf(orgs[0]) : [],
+      members, companies, contacts, products, deals, documents, audit: auditRows, bankAccounts: bankAccountsOf(org),
     }, today().slice(0, 7));
   }
 
@@ -322,7 +329,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function assertLimit(ctx, key, extra = 1) {
     const limit = limitOf(ctx.plan, key);
     if (limit === Infinity) return;
-    const used = (await orgUsage(ctx.org.id))[key];
+    const used = (await orgUsage(ctx.org))[key];
     if (used + extra > limit) {
       throw new HttpError(402, `Планът „${ctx.plan.name}“ позволява до ${limit} ${LIMITS[key].label}. За повече се свържете с БУЛАДМИН за по-голям план.`);
     }
@@ -349,21 +356,31 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const [member] = await store.find('members', 'id', memberId(orgId, user.id));
     const platform = isPlatformAdmin(user);
     if ((!member || member.isActive !== 'Да') && !platform) throw new HttpError(403, 'Нямате достъп до тази организация.');
-    if (org.orgStatus === 'Спряна' && !platform) {
-      throw new HttpError(403, 'Достъпът до организацията е спрян. Свържете се с БУЛАДМИН.');
+    // Базата данни (сайтът) на нова фирма се подготвя до около минута след регистрацията.
+    if (org.dbStatus && org.dbStatus !== 'Готова') {
+      throw new HttpError(409, org.dbStatus === 'Грешка'
+        ? 'Базата данни на фирмата не беше създадена. Администраторите на БУЛАДМИН са уведомени.'
+        : 'Подготвяме базата данни на фирмата. Опитайте след минута.');
     }
     const plan = effectivePlan(org, await loadPlans(), today());
-    if (paymentDue(org, today()) && !platform) throw new HttpError(402, paymentMessage(org, plan));
+    // Спряна или неплатена фирма: данните се виждат и експортират, но не се създават и променят.
+    const readOnly = (org.orgStatus === 'Спряна' || paymentDue(org, today())) && !platform;
+    const readOnlyReason = org.orgStatus === 'Спряна'
+      ? 'Организацията е спряна: данните се виждат и изтеглят, но не могат да се въвеждат нови.'
+      : paymentMessage(org, plan);
     const memberRole = member?.isActive === 'Да' ? member.role : ADMIN;
-    const ctx = { user, org, role: memberRole, platform: platform && memberRole !== member?.role, plan };
+    const ctx = {
+      user, org, role: memberRole, platform: platform && memberRole !== member?.role, plan, db: orgDb(org), readOnly, readOnlyReason,
+    };
+    if (role && readOnly) throw new HttpError(org.orgStatus === 'Спряна' ? 403 : 402, readOnlyReason);
     if (role === 'editor' && ctx.role === VIEWER) throw new HttpError(403, 'Вашият достъп е само за преглед.');
     if (role === 'admin' && ctx.role !== ADMIN) throw new HttpError(403, 'Това действие е само за администратор на организацията.');
     return ctx;
   }
 
-  async function getRecord(entity, id, orgId) {
-    const [record] = await store.find(entity, 'id', id);
-    if (!record || record.orgId !== orgId) throw new HttpError(404, 'Записът не е намерен.');
+  async function getRecord(ctx, entity, id) {
+    const [record] = await ctx.db.find(entity, 'id', id);
+    if (!record || record.orgId !== ctx.org.id) throw new HttpError(404, 'Записът не е намерен.');
     return record;
   }
 
@@ -658,7 +675,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       user: publicUser(user),
       security: { password: !!user.passwordHash, google: !!user.googleId, microsoft: !!user.microsoftId },
       orgs: memberships.map(({ member, org }) => ({
-        id: org.id, name: org.name, role: member.role, status: paymentDue(org, today()) ? 'Чака плащане' : org.orgStatus, plan: effectivePlan(org, plans, today()).name,
+        id: org.id, name: org.name, role: member.role, status: paymentDue(org, today()) ? 'Чака плащане' : org.orgStatus, plan: effectivePlan(org, plans, today()).name, dbStatus: org.dbStatus || 'Готова',
       })),
     });
   }
@@ -690,9 +707,9 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const entities = [...GENERIC, 'documents', 'payments'];
     const allowed = (e) => !schema[e].feature || hasFeature(ctx.plan, schema[e].feature);
     const [lists, members, auditRows] = await Promise.all([
-      Promise.all(entities.map((e) => (allowed(e) ? store.find(e, 'orgId', ctx.org.id) : []))),
+      Promise.all(entities.map((e) => (allowed(e) ? ctx.db.find(e, 'orgId', ctx.org.id) : []))),
       store.find('members', 'orgId', ctx.org.id),
-      store.find('audit', 'orgId', ctx.org.id),
+      ctx.db.find('audit', 'orgId', ctx.org.id),
     ]);
     const data = {};
     entities.forEach((entity, i) => {
@@ -713,13 +730,15 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     }, today().slice(0, 7));
     data.role = ctx.role;
     data.viaPlatform = ctx.platform;
+    data.readOnly = ctx.readOnly;
+    data.readOnlyReason = ctx.readOnly ? ctx.readOnlyReason : '';
     return json(data);
   }
 
   async function history(request, entity, id) {
     const ctx = await orgContext(request);
     if (!schema[entity] || ['settings', 'audit', 'plans'].includes(entity)) throw new HttpError(404, 'Няма такъв раздел.');
-    const events = (await store.find('audit', 'recordId', id))
+    const events = (await auditStore(ctx, entity).find('audit', 'recordId', id))
       .map((e, i) => ({ e, i }))
       .filter(({ e }) => e.entity === entity && e.orgId === ctx.org.id)
       .sort((a, b) => String(b.e.occurredAt).localeCompare(String(a.e.occurredAt)) || b.i - a.i);
@@ -734,7 +753,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       const value = values[column.name];
       if (!value || errors[column.name]) continue;
       if (column.input === 'ref') {
-        const [target] = await store.find(column.ref, 'id', value);
+        const [target] = await ctx.db.find(column.ref, 'id', value);
         if (!target || target.orgId !== ctx.org.id) errors[column.name] = 'Записът не съществува.';
       }
       if (column.input === 'user' && !members.has(value)) errors[column.name] = 'Няма такъв потребител в организацията.';
@@ -794,7 +813,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (entity === 'activities' && !record.assignedTo) record.assignedTo = ctx.user.id;
     if (['companies', 'deals', 'tenders'].includes(entity) && !record.owner) record.owner = ctx.user.id;
     if (entity === 'tenders') record.checklist = JSON.stringify(defaultChecklist());
-    await store.create(entity, record);
+    await ctx.db.create(entity, record);
     await audit(ctx, entity, record.id, 'Създаване');
     await notifyAssignment(ctx, entity, record);
     const out = publicRecord(entity, record);
@@ -804,7 +823,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function updateGeneric(request, entity, id) {
     const ctx = await orgContext(request, { role: 'editor' });
     if (schema[entity].feature) requireFeature(ctx, schema[entity].feature);
-    const before = await getRecord(entity, id, ctx.org.id);
+    const before = await getRecord(ctx, entity, id);
     const { values, errors } = validateRecord(entity, await readBody(request), { partial: true });
     await checkRefs(ctx, entity, values, errors);
     failIfErrors(errors);
@@ -813,7 +832,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const OPEN = ['Нова', 'Квалифицирана', 'Оферта', 'Преговори'];
     if (entity === 'deals' && values.stage && OPEN.includes(values.stage) && !OPEN.includes(before.stage)) await assertLimit(ctx, 'maxDeals');
     const patch = { ...values, ...derived(entity, values, before), updatedAt: nowIso() };
-    await store.update(entity, id, patch);
+    await ctx.db.update(entity, id, patch);
     await audit(ctx, entity, id, 'Промяна', changed.join(', '));
     const after = { ...before, ...patch };
     const field = ASSIGNEE[entity];
@@ -826,10 +845,10 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function saveChecklist(request, id) {
     const ctx = await orgContext(request, { role: 'editor' });
     requireFeature(ctx, 'allowProcurement');
-    const tender = await getRecord('tenders', id, ctx.org.id);
+    const tender = await getRecord(ctx, 'tenders', id);
     const { items, error } = validateChecklist((await readBody(request)).items);
     if (error) throw new HttpError(422, error);
-    await store.update('tenders', id, { checklist: JSON.stringify(items), updatedAt: nowIso() });
+    await ctx.db.update('tenders', id, { checklist: JSON.stringify(items), updatedAt: nowIso() });
     const ready = items.filter((i) => i.state === 'Готов').length;
     const needed = items.filter((i) => i.state !== 'Неприложим').length;
     await audit(ctx, 'tenders', id, 'Документи', `готови ${ready} от ${needed}`);
@@ -838,13 +857,13 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
 
   async function deleteGeneric(request, entity, id) {
     const ctx = await orgContext(request, { role: 'admin' });
-    await getRecord(entity, id, ctx.org.id);
+    await getRecord(ctx, entity, id);
     for (const ref of REFERENCES.filter((r) => r.target === entity)) {
-      if ((await store.find(ref.entity, ref.field, id)).length) {
+      if ((await ctx.db.find(ref.entity, ref.field, id)).length) {
         throw new HttpError(409, `Записът се използва в „${schema[ref.entity].label}“. Първо премахнете връзките.`);
       }
     }
-    await store.remove(entity, id);
+    await ctx.db.remove(entity, id);
     await audit(ctx, entity, id, 'Изтриване');
     return json({ ok: true });
   }
@@ -854,17 +873,17 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function documentInput(ctx, body, docType) {
     const errors = {};
     const values = {};
-    const products = new Map((await store.find('products', 'orgId', ctx.org.id)).map((p) => [p.id, p]));
+    const products = new Map((await ctx.db.find('products', 'orgId', ctx.org.id)).map((p) => [p.id, p]));
     const { lines, error } = validateLines(body.lines, products);
     if (error) errors.lines = error;
 
     values.companyId = clean(body.companyId, 40);
-    const [company] = values.companyId ? await store.find('companies', 'id', values.companyId) : [];
+    const [company] = values.companyId ? await ctx.db.find('companies', 'id', values.companyId) : [];
     if (!values.companyId) errors.companyId = 'Изберете контрагент.';
     else if (!company || company.orgId !== ctx.org.id) errors.companyId = 'Контрагентът не съществува.';
     values.dealId = clean(body.dealId, 40);
     if (values.dealId) {
-      const [deal] = await store.find('deals', 'id', values.dealId);
+      const [deal] = await ctx.db.find('deals', 'id', values.dealId);
       if (!deal || deal.orgId !== ctx.org.id) errors.dealId = 'Сделката не съществува.';
     }
 
@@ -916,7 +935,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     let relatedId = '';
     if (docType === 'Кредитно известие') {
       relatedId = clean(body.relatedId, 40);
-      const [invoice] = relatedId ? await store.find('documents', 'id', relatedId) : [];
+      const [invoice] = relatedId ? await ctx.db.find('documents', 'id', relatedId) : [];
       if (!invoice || invoice.orgId !== ctx.org.id || invoice.docType !== 'Фактура' || invoice.docStatus !== 'Издаден') {
         errors.relatedId = 'Кредитното известие трябва да е към издадена фактура.';
       }
@@ -940,13 +959,13 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       createdAt: stamp,
       updatedAt: stamp,
     };
-    await store.create('documents', record);
+    await ctx.db.create('documents', record);
     await audit(ctx, 'documents', record.id, `Създадена чернова: ${docType}`);
     return json(publicDocument(record), 201);
   }
 
   async function getDraft(ctx, id) {
-    const doc = await getRecord('documents', id, ctx.org.id);
+    const doc = await getRecord(ctx, 'documents', id);
     if (doc.docStatus !== 'Чернова') {
       throw new HttpError(409, 'Издаден документ не може да се променя. Анулирайте го или издайте кредитно известие.');
     }
@@ -959,7 +978,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const { values, errors } = await documentInput(ctx, await readBody(request), doc.docType);
     failIfErrors(errors);
     const patch = { ...values, issueDate: values.issueDate || doc.issueDate, updatedAt: nowIso() };
-    await store.update('documents', id, patch);
+    await ctx.db.update('documents', id, patch);
     await audit(ctx, 'documents', id, 'Промяна на чернова');
     return json(publicDocument({ ...doc, ...patch }));
   }
@@ -968,34 +987,34 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const ctx = await orgContext(request, { role: 'editor' });
     const doc = await getDraft(ctx, id);
     if (ctx.role !== ADMIN && doc.createdBy !== ctx.user.id) throw new HttpError(403, 'Може да изтриете само свои чернови.');
-    await store.remove('documents', id);
+    await ctx.db.remove('documents', id);
     await audit(ctx, 'documents', id, 'Изтрита чернова');
     return json({ ok: true });
   }
 
   // Наличностите се движат при издаване на фактура (намаляват) и кредитно известие (връщат се).
-  async function moveStock(doc, direction) {
+  async function moveStock(ctx, doc, direction) {
     if (!TAX_DOCS.includes(doc.docType)) return;
     const sign = (doc.docType === 'Фактура' ? -1 : 1) * direction;
     for (const line of parseJson(doc.lines, [])) {
       if (!line.productId) continue;
-      const [product] = await store.find('products', 'id', line.productId);
+      const [product] = await ctx.db.find('products', 'id', line.productId);
       if (product?.itemType !== 'Стока' || product.orgId !== doc.orgId) continue;
       const stock = Math.round(((Number(product.stock) || 0) + sign * line.qty) * 1000) / 1000;
-      await store.update('products', product.id, { stock, updatedAt: nowIso() });
+      await ctx.db.update('products', product.id, { stock, updatedAt: nowIso() });
     }
   }
 
   // Номерацията е отделна за всяка организация. Ако двама издадат едновременно, вторият вижда дублирания номер и опитва отново.
-  async function assignNumber(doc, company) {
+  async function assignNumber(ctx, doc, company) {
     const year = (doc.issueDate || today()).slice(0, 4);
     const sameKind = (d) => d.docType === doc.docType || (TAX_DOCS.includes(d.docType) && TAX_DOCS.includes(doc.docType));
     for (let attempt = 0; attempt < 5; attempt++) {
-      const number = nextNumber(await store.find('documents', 'orgId', doc.orgId), doc.docType, { year, invoiceStart: company.invoiceStart });
-      await store.update('documents', doc.id, { number });
-      const same = (await store.find('documents', 'number', number)).filter((d) => d.orgId === doc.orgId && sameKind(d));
+      const number = nextNumber(await ctx.db.find('documents', 'orgId', doc.orgId), doc.docType, { year, invoiceStart: company.invoiceStart });
+      await ctx.db.update('documents', doc.id, { number });
+      const same = (await ctx.db.find('documents', 'number', number)).filter((d) => d.orgId === doc.orgId && sameKind(d));
       if (same.length === 1) return number;
-      await store.update('documents', doc.id, { number: '' });
+      await ctx.db.update('documents', doc.id, { number: '' });
     }
     throw new HttpError(409, 'Не успяхме да запазим номер. Опитайте отново.');
   }
@@ -1009,7 +1028,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (!company.name || !isValidEik(company.eik)) {
       throw new HttpError(422, 'Попълнете данните на фирмата в „Настройки“ (наименование и ЕИК), преди да издавате документи.');
     }
-    const [buyer] = await store.find('companies', 'id', doc.companyId);
+    const [buyer] = await ctx.db.find('companies', 'id', doc.companyId);
     if (!buyer || buyer.orgId !== ctx.org.id) throw new HttpError(422, 'Контрагентът вече не съществува.');
     if (TAX_DOCS.includes(doc.docType)) {
       if (!buyer.address && !buyer.city) throw new HttpError(422, 'Попълнете адреса на контрагента, преди да издадете фактура.');
@@ -1025,7 +1044,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const issueDate = doc.issueDate || today();
     // Ограничението е за документите, издадени през месеца на издаване.
     if (DOC_LIMIT[doc.docType] && issueDate.startsWith(today().slice(0, 7))) await assertLimit(ctx, DOC_LIMIT[doc.docType]);
-    const number = await assignNumber({ ...doc, issueDate }, company);
+    const number = await assignNumber(ctx, { ...doc, issueDate }, company);
     const patch = {
       number,
       docStatus: 'Издаден',
@@ -1041,33 +1060,33 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       issuedAt: nowIso(),
       updatedAt: nowIso(),
     };
-    await store.update('documents', id, patch);
+    await ctx.db.update('documents', id, patch);
     const issued = { ...doc, ...patch };
-    await moveStock(issued, 1);
+    await moveStock(ctx, issued, 1);
     await audit(ctx, 'documents', id, `Издаден ${doc.docType} № ${number}`);
     return json(publicDocument(issued));
   }
 
   async function setOfferStatus(request, id) {
     const ctx = await orgContext(request, { role: 'editor' });
-    const doc = await getRecord('documents', id, ctx.org.id);
+    const doc = await getRecord(ctx, 'documents', id);
     const { status } = await readBody(request);
     if (doc.docType !== 'Оферта' || !['Издаден', 'Приета', 'Отказана'].includes(doc.docStatus) || !['Приета', 'Отказана'].includes(status)) {
       throw new HttpError(409, 'Само издадена оферта може да се отбележи като приета или отказана.');
     }
-    await store.update('documents', id, { docStatus: status, updatedAt: nowIso() });
+    await ctx.db.update('documents', id, { docStatus: status, updatedAt: nowIso() });
     await audit(ctx, 'documents', id, `Офертата е ${status.toLowerCase()}`);
     return json(publicDocument({ ...doc, docStatus: status }));
   }
 
   async function cancelDocument(request, id) {
     const ctx = await orgContext(request, { role: 'editor' });
-    const doc = await getRecord('documents', id, ctx.org.id);
+    const doc = await getRecord(ctx, 'documents', id);
     if (doc.docStatus === 'Чернова' || doc.docStatus === 'Анулиран') throw new HttpError(409, 'Документът не е издаден.');
     if (Number(doc.paidAmount) > 0) throw new HttpError(409, 'Документът има плащания. Първо ги изтрийте или издайте кредитно известие.');
     if (TAX_DOCS.includes(doc.docType) && ctx.role !== ADMIN) throw new HttpError(403, 'Фактури и известия се анулират само от администратор.');
-    await store.update('documents', id, { docStatus: 'Анулиран', updatedAt: nowIso() });
-    if (doc.docStatus === 'Издаден') await moveStock(doc, -1);
+    await ctx.db.update('documents', id, { docStatus: 'Анулиран', updatedAt: nowIso() });
+    if (doc.docStatus === 'Издаден') await moveStock(ctx, doc, -1);
     await audit(ctx, 'documents', id, 'Анулиран');
     return json(publicDocument({ ...doc, docStatus: 'Анулиран' }));
   }
@@ -1075,7 +1094,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   // Нова чернова от съществуващ документ: оферта → проформа/фактура, фактура → кредитно известие.
   async function deriveDocument(request, id) {
     const ctx = await orgContext(request, { role: 'editor' });
-    const source = await getRecord('documents', id, ctx.org.id);
+    const source = await getRecord(ctx, 'documents', id);
     const { docType } = await readBody(request);
     const allowed = {
       'Оферта': ['Проформа фактура', 'Фактура'],
@@ -1117,9 +1136,9 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       createdAt: stamp,
       updatedAt: stamp,
     };
-    await store.create('documents', record);
+    await ctx.db.create('documents', record);
     if (source.docType === 'Оферта' && source.docStatus === 'Издаден') {
-      await store.update('documents', source.id, { docStatus: 'Приета', updatedAt: stamp });
+      await ctx.db.update('documents', source.id, { docStatus: 'Приета', updatedAt: stamp });
     }
     await audit(ctx, 'documents', record.id, `Създадена чернова от ${source.docType} № ${source.number}`);
     return json(publicDocument(record), 201);
@@ -1167,7 +1186,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function sendDocument(request, id) {
     const ctx = await orgContext(request, { role: 'editor' });
     if (!mailEnabled) throw new HttpError(503, 'Имейлите са изключени в системата.');
-    const doc = await getRecord('documents', id, ctx.org.id);
+    const doc = await getRecord(ctx, 'documents', id);
     if (!SENDABLE.includes(doc.docStatus)) throw new HttpError(409, 'Изпраща се само издаден документ.');
     const body = await readBody(request);
     const errors = {};
@@ -1192,7 +1211,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const patch = { sentAt: nowIso(), sentTo: [...to, ...cc].join(', ').slice(0, 255), updatedAt: nowIso() };
     let link = '';
     if (doc.docType === 'Оферта' && doc.docStatus === 'Издаден') {
-      const token = `${doc.id}.${randomToken(24)}`;
+      const token = `${ctx.org.id}.${doc.id}.${randomToken(24)}`;
       patch.publicTokenHash = await hashToken(token);
       link = offerLink(token);
     }
@@ -1220,34 +1239,36 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       attachments: [{ name: `${doc.docType} ${doc.number}.pdf`, contentType: 'application/pdf', bytes: pdf }],
     });
     if (!sent) throw new HttpError(502, 'Имейлът не беше изпратен. Опитайте отново след малко.');
-    await store.update('documents', id, patch);
+    await ctx.db.update('documents', id, patch);
     await audit(ctx, 'documents', id, EMAIL_ACTION, [...to, ...cc].join(', '));
     return json(publicDocument({ ...doc, ...patch }));
   }
 
   // --- Оферта през линк: клиентът я вижда и отговаря без вход ---
 
+  // Линкът е „фирма.документ.случаен низ“: фирмата казва в кой сайт е документът.
   async function offerByToken(token) {
-    const docId = String(token || '').split('.')[0];
-    if (!/^DOC-[\w]{4,20}$/.test(docId)) return null;
-    const [doc] = await store.find('documents', 'id', docId);
-    if (!doc?.publicTokenHash || !safeEqual(doc.publicTokenHash, await hashToken(String(token)))) return null;
+    const [orgId, docId] = String(token || '').split('.');
+    if (!/^ORG-[\w-]{1,30}$/.test(orgId) || !/^DOC-[\w-]{1,30}$/.test(docId)) return null;
+    const [org] = await store.find('orgs', 'id', orgId);
+    if (!org || org.orgStatus === 'Спряна' || (org.dbStatus && org.dbStatus !== 'Готова')) return null;
+    const db = orgDb(org);
+    const [doc] = await db.find('documents', 'id', docId);
+    if (!doc || doc.orgId !== org.id || !doc.publicTokenHash || !safeEqual(doc.publicTokenHash, await hashToken(String(token)))) return null;
     if (doc.docType !== 'Оферта' || doc.docStatus === 'Анулиран') return null;
-    const [org] = await store.find('orgs', 'id', doc.orgId);
-    if (!org || org.orgStatus === 'Спряна') return null;
-    return { doc, org };
+    return { doc, org, db };
   }
 
   async function publicOffer(request) {
     const { token } = await readBody(request);
     const found = await offerByToken(token);
     if (!found) throw new HttpError(404, 'Линкът не е валиден или офертата вече не е достъпна.');
-    const { doc, org } = found;
+    const { doc, org, db } = found;
     const plan = effectivePlan(org, await loadPlans(), today());
     let logo = null;
     if (org.logoItemId && hasFeature(plan, 'allowLogo')) {
       try {
-        const bytes = await store.downloadFile(org.logoItemId);
+        const bytes = await db.downloadFile(org.logoItemId);
         let binary = '';
         for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
         logo = { type: org.logoType || 'image/png', base64: btoa(binary) };
@@ -1265,7 +1286,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const body = await readBody(request);
     const found = await offerByToken(body.token);
     if (!found) throw new HttpError(404, 'Линкът не е валиден или офертата вече не е достъпна.');
-    const { doc, org } = found;
+    const { doc, org, db } = found;
     if (doc.docStatus !== 'Издаден') throw new HttpError(409, `Офертата вече е ${doc.docStatus.toLowerCase()}.`);
     if (doc.dueDate && doc.dueDate < today()) throw new HttpError(409, 'Срокът на валидност на офертата е изтекъл. Свържете се с изпращача за нова оферта.');
     const accept = body.decision === 'accept';
@@ -1275,8 +1296,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const note = clean(body.note, 2000, { multiline: true });
     const status = accept ? 'Приета' : 'Отказана';
     const patch = { docStatus: status, decisionAt: nowIso(), decisionBy: name, decisionNote: note, updatedAt: nowIso() };
-    await store.update('documents', doc.id, patch);
-    await audit({ org, user: { id: 'client', fullName: `${name} (клиент, през линк)` } }, 'documents', doc.id, `Офертата е ${status.toLowerCase()} от клиента`, note);
+    await db.update('documents', doc.id, patch);
+    await audit({ org, db, user: { id: 'client', fullName: `${name} (клиент, през линк)` } }, 'documents', doc.id, `Офертата е ${status.toLowerCase()} от клиента`, note);
     // Известие до този, който е създал офертата, и до имейла на фирмата.
     const subject = `${docTitle(doc)}: ${accept ? 'приета' : 'отказана'} от ${doc.companyName || 'клиента'}`;
     const message = {
@@ -1294,10 +1315,10 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   // --- Плащания ---
 
   async function recalcPaid(ctx, documentId) {
-    const doc = await getRecord('documents', documentId, ctx.org.id);
-    const paid = round2((await store.find('payments', 'documentId', documentId)).reduce((sum, p) => sum + (Number(p.amount) || 0), 0));
+    const doc = await getRecord(ctx, 'documents', documentId);
+    const paid = round2((await ctx.db.find('payments', 'documentId', documentId)).reduce((sum, p) => sum + (Number(p.amount) || 0), 0));
     const patch = { paidAmount: paid, paymentStatus: paymentStatusOf(Number(doc.total) || 0, paid), updatedAt: nowIso() };
-    await store.update('documents', documentId, patch);
+    await ctx.db.update('documents', documentId, patch);
     return { ...doc, ...patch };
   }
 
@@ -1306,7 +1327,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const body = await readBody(request);
     const errors = {};
     const documentId = clean(body.documentId, 40);
-    const [doc] = documentId ? await store.find('documents', 'id', documentId) : [];
+    const [doc] = documentId ? await ctx.db.find('documents', 'id', documentId) : [];
     if (!doc || doc.orgId !== ctx.org.id || doc.docStatus !== 'Издаден' || !['Фактура', 'Проформа фактура'].includes(doc.docType)) {
       errors.documentId = 'Плащане се отбелязва по издадена фактура или проформа.';
     }
@@ -1332,7 +1353,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       createdBy: ctx.user.id,
       createdAt: nowIso(),
     };
-    await store.create('payments', payment);
+    await ctx.db.create('payments', payment);
     const updated = await recalcPaid(ctx, documentId);
     await audit(ctx, 'documents', documentId, 'Плащане', `${money(amount, doc.currency || 'EUR')}, ${method}`);
     return json({ payment: publicRecord('payments', payment), document: publicDocument(updated) }, 201);
@@ -1340,8 +1361,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
 
   async function deletePayment(request, id) {
     const ctx = await orgContext(request, { role: 'admin' });
-    const payment = await getRecord('payments', id, ctx.org.id);
-    await store.remove('payments', id);
+    const payment = await getRecord(ctx, 'payments', id);
+    await ctx.db.remove('payments', id);
     const updated = await recalcPaid(ctx, payment.documentId);
     await audit(ctx, 'documents', payment.documentId, 'Изтрито плащане', money(payment.amount, updated.currency || 'EUR'));
     return json({ document: publicDocument(updated) });
@@ -1418,9 +1439,12 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       throw new HttpError(409, 'Фирма с този ЕИК вече е регистрирана. Помолете нейния администратор да Ви покани.', { eik: 'Вече е регистрирана.' });
     }
     const pending = !freeAllowed;
+    const orgId = newId('orgs');
     const org = {
-      id: newId('orgs'), ...values, invoiceStart: values.invoiceStart || '1', dueDays: values.dueDays || '7',
+      id: orgId, ...values, invoiceStart: values.invoiceStart || '1', dueDays: values.dueDays || '7',
       planId: plan.id, orgStatus: pending ? 'Чака плащане' : 'Активна', paidOnly: pending ? 'Да' : 'Не',
+      // Отделен SharePoint сайт за данните на фирмата; създава се на стъпки (виж provisionOrg).
+      sitePath: `/sites/cloud-${orgId.toLowerCase()}`, dbStatus: 'Подготвя се',
       createdBy: user.id, createdAt: nowIso(), updatedAt: nowIso(),
     };
     await store.create('orgs', org);
@@ -1437,7 +1461,57 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     ].filter(Boolean), `${env.APP_ORIGIN}/app.html#/platform/orgs/${org.id}`).catch((err) => console.error('notify failed', err.message));
     if (ctx?.waitUntil) ctx.waitUntil(work);
     else await work;
-    return json({ id: org.id, name: org.name, status: org.orgStatus, plan: plan.name }, 201);
+    // Първата стъпка (заявката за сайт) веднага; останалите — от интерфейса, докато базата е готова.
+    const progress = await provisionOrg(org).catch((err) => ({ dbStatus: 'Подготвя се', step: 'site', error: err.message }));
+    return json({ id: org.id, name: org.name, status: org.orgStatus, plan: plan.name, dbStatus: progress.dbStatus }, 201);
+  }
+
+  // --- Отделен SharePoint сайт за всяка фирма ---
+
+  // Една стъпка от подготовката: заявка за сайт → изчакване → създаване на таблиците (по няколко наведнъж) → готово.
+  // Безопасно е да се вика многократно и от няколко места (интерфейса и сутрешния Cron).
+  async function provisionOrg(org) {
+    if (!org.sitePath) return { dbStatus: 'Готова', step: 'done' };
+    if (org.dbStatus === 'Готова') return { dbStatus: 'Готова', step: 'done' };
+    const fail = async (message) => {
+      await store.update('orgs', org.id, { dbStatus: 'Грешка', dbError: message.slice(0, 250), updatedAt: nowIso() });
+      await notifyPlatform(`Грешка при базата данни: ${org.name}`, [
+        `Сайтът ${org.sitePath} за „${org.name}“ не беше подготвен: ${message}`,
+        'Отворете фирмата в „Организации“ и натиснете „Подгответе базата отново“.',
+      ], `${env.APP_ORIGIN}/app.html#/platform/orgs/${org.id}`).catch(() => {});
+      return { dbStatus: 'Грешка', step: 'error', error: message };
+    };
+    let status = await store.siteStatus(org.sitePath);
+    if (status === 'missing') {
+      status = await store.createSite({ sitePath: org.sitePath, title: `BulAdmin Cloud – ${org.name}`, owner: env.SP_SITE_OWNER || org.createdBy });
+    }
+    if (status === 'error') return fail('SharePoint върна грешка при създаването на сайта.');
+    if (status !== 'ready') return { dbStatus: 'Подготвя се', step: 'site' };
+    const { done } = await orgDb(org).ensureLists(ORG_SITE_TABLES);
+    if (!done) return { dbStatus: 'Подготвя се', step: 'lists' };
+    await store.update('orgs', org.id, { dbStatus: 'Готова', dbError: '', updatedAt: nowIso() });
+    await audit({ org }, 'orgs', org.id, 'Базата данни е готова', org.sitePath);
+    return { dbStatus: 'Готова', step: 'done' };
+  }
+
+  async function provisionRequest(request, orgId) {
+    const user = await requireUser(request);
+    const [org] = await store.find('orgs', 'id', orgId);
+    if (!org) throw new HttpError(404, 'Организацията не е намерена.');
+    const [member] = await store.find('members', 'id', memberId(orgId, user.id));
+    if (!isPlatformAdmin(user) && member?.isActive !== 'Да') throw new HttpError(403, 'Нямате достъп до тази организация.');
+    // След грешка само администратор на БУЛАДМИН пуска подготовката отново.
+    if (org.dbStatus === 'Грешка') {
+      if (!isPlatformAdmin(user)) return json({ dbStatus: 'Грешка', step: 'error' });
+      org.dbStatus = 'Подготвя се';
+      await store.update('orgs', org.id, { dbStatus: 'Подготвя се', dbError: '' });
+    }
+    try {
+      return json(await provisionOrg(org));
+    } catch (err) {
+      console.error('provision failed', org.id, err.message);
+      return json({ dbStatus: 'Подготвя се', step: 'retry' });
+    }
   }
 
   // --- Администрация на организацията ---
@@ -1480,8 +1554,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const png = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
     const jpg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
     if ((type === 'image/png' && !png) || (type === 'image/jpeg' && !jpg)) throw new HttpError(415, 'Логото трябва да е PNG или JPG.');
-    const itemId = await store.uploadFile(`Логота/${ctx.org.id}.${png ? 'png' : 'jpg'}`, bytes, type);
-    if (ctx.org.logoItemId && ctx.org.logoItemId !== itemId) await store.deleteFile(ctx.org.logoItemId).catch(() => {});
+    const itemId = await ctx.db.uploadFile(`Логота/${ctx.org.id}.${png ? 'png' : 'jpg'}`, bytes, type);
+    if (ctx.org.logoItemId && ctx.org.logoItemId !== itemId) await ctx.db.deleteFile(ctx.org.logoItemId).catch(() => {});
     await store.update('orgs', ctx.org.id, { logoItemId: itemId, logoType: type, updatedAt: nowIso() });
     await audit(ctx, 'orgs', ctx.org.id, 'Ново лого');
     return json({ ok: true });
@@ -1489,7 +1563,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
 
   async function deleteLogo(request) {
     const ctx = await orgContext(request, { role: 'admin' });
-    if (ctx.org.logoItemId) await store.deleteFile(ctx.org.logoItemId).catch(() => {});
+    if (ctx.org.logoItemId) await ctx.db.deleteFile(ctx.org.logoItemId).catch(() => {});
     await store.update('orgs', ctx.org.id, { logoItemId: '', logoType: '', updatedAt: nowIso() });
     await audit(ctx, 'orgs', ctx.org.id, 'Премахнато лого');
     return json({ ok: true });
@@ -1499,7 +1573,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function getLogo(request, orgId) {
     const ctx = await orgContext(request, { orgId });
     if (!ctx.org.logoItemId || ctx.plan.allowLogo !== 'Да') throw new HttpError(404, 'Няма лого.');
-    const bytes = await store.downloadFile(ctx.org.logoItemId);
+    const bytes = await ctx.db.downloadFile(ctx.org.logoItemId);
     return new Response(bytes, {
       headers: { 'content-type': ctx.org.logoType || 'image/png', 'cache-control': 'private, max-age=300', 'x-content-type-options': 'nosniff' },
     });
@@ -1582,15 +1656,23 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
 
   async function platformOverview(request) {
     await requirePlatformAdmin(request);
-    const [orgs, plans, members, users, companies, contacts, products, deals, documents, auditRows] = await Promise.all(
-      ['orgs', 'plans', 'members', 'users', 'companies', 'contacts', 'products', 'deals', 'documents', 'audit'].map((t) => (t === 'plans' ? loadPlans() : store.list(t))),
-    );
+    const [orgs, plans, members, users] = await Promise.all([store.list('orgs'), loadPlans(), store.list('members'), store.list('users')]);
     const month = today().slice(0, 7);
     const by = (rows, orgId) => rows.filter((r) => r.orgId === orgId);
+    // Използването се брои в сайта на всяка фирма; фирма с неготова база данни е с нули.
+    const usages = await Promise.all(orgs.map(async (o) => {
+      if (o.dbStatus && o.dbStatus !== 'Готова') return usageOf({ members: by(members, o.id), companies: [], contacts: [], products: [], deals: [], documents: [] }, month);
+      try {
+        return await orgUsage(o);
+      } catch (err) {
+        console.error('usage failed', o.id, err.message);
+        return usageOf({ members: by(members, o.id), companies: [], contacts: [], products: [], deals: [], documents: [] }, month);
+      }
+    }));
     const userMap = new Map(users.map((u) => [u.id, u]));
     return json({
       plans: plans.map(publicPlan),
-      orgs: orgs.map((o) => {
+      orgs: orgs.map((o, index) => {
         const orgMembers = by(members, o.id);
         const plan = effectivePlan(o, plans, today());
         return {
@@ -1608,10 +1690,12 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
           members: orgMembers.map((m) => ({
             email: m.userId, name: userMap.get(m.userId)?.fullName || m.userId, role: m.role, isActive: m.isActive,
           })),
-          usage: usageOf({
-            members: orgMembers, companies: by(companies, o.id), contacts: by(contacts, o.id), products: by(products, o.id),
-            deals: by(deals, o.id), documents: by(documents, o.id), audit: by(auditRows, o.id), bankAccounts: bankAccountsOf(o),
-          }, month),
+          usage: usages[index],
+          sitePath: o.sitePath || '',
+          siteUrl: o.sitePath ? `https://${env.SP_HOSTNAME}${o.sitePath}` : '',
+          // Фирмите отпреди отделните сайтове работят с общия сайт, докато не се преместят (migrate-org-sites.mjs).
+          dbStatus: o.sitePath ? (o.dbStatus || 'Готова') : (o.dbStatus === 'Подготвя се' ? 'Подготвя се' : 'Обща'),
+          dbError: o.dbError || '',
         };
       }),
       users: users.map((u) => ({
@@ -1747,18 +1831,38 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
 
   // --- Ежедневни напомняния по имейл (Cloudflare Cron, всяка сутрин) ---
 
+  // Сутрешният Cron довършва и неготовите бази данни на нови фирми.
+  async function pendingProvisioning() {
+    for (const org of (await store.list('orgs')).filter((o) => o.dbStatus === 'Подготвя се')) {
+      await provisionOrg(org).catch((err) => console.error('provision failed', org.id, err.message));
+    }
+  }
+
   async function dailyDigest() {
+    await pendingProvisioning();
     if (!mailEnabled) return { sent: 0 };
     const day = today();
     const soon = new Date(now().getTime() + 3 * 24 * 3600 * 1000).toISOString();
-    const [orgs, plans, members, users, activities, documents, tenders] = await Promise.all(
-      ['orgs', 'plans', 'members', 'users', 'activities', 'documents', 'tenders'].map((t) => (t === 'plans' ? loadPlans() : store.list(t))),
-    );
+    const [orgs, plans, members, users] = await Promise.all([store.list('orgs'), loadPlans(), store.list('members'), store.list('users')]);
     const userMap = new Map(users.map((u) => [u.id, u]));
     let sent = 0;
     for (const org of orgs) {
-      if (org.orgStatus !== 'Активна' || paymentDue(org, day)) continue;
+      if (org.orgStatus !== 'Активна' || paymentDue(org, day) || (org.dbStatus && org.dbStatus !== 'Готова')) continue;
       const plan = effectivePlan(org, plans, day);
+      // Данните на всяка фирма са в нейния сайт.
+      const db = orgDb(org);
+      let activities;
+      let documents;
+      let tenders;
+      try {
+        [activities, documents, tenders] = await Promise.all([
+          db.find('activities', 'orgId', org.id), db.find('documents', 'orgId', org.id),
+          hasFeature(plan, 'allowProcurement') ? db.find('tenders', 'orgId', org.id) : [],
+        ]);
+      } catch (err) {
+        console.error('digest failed', org.id, err.message);
+        continue;
+      }
       const orgMembers = members.filter((m) => m.orgId === org.id && m.isActive === 'Да');
       const admins = orgMembers.filter((m) => m.role === ADMIN).map((m) => m.userId);
       const items = new Map(); // потребител → редове
@@ -1836,6 +1940,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (method === 'POST' && (m = path.match(/^\/api\/account\/unlink\/(\w+)$/)) && isProvider(m[1])) return unlink(request, m[1]);
 
     if (method === 'GET' && path === '/api/orgs/options') return registrationOptions(request);
+    if (method === 'POST' && (m = path.match(/^\/api\/orgs\/([\w-]{1,40})\/provision$/))) return provisionRequest(request, m[1]);
     if (method === 'POST' && path === '/api/orgs') return createOrg(request, ctx);
     if (method === 'GET' && (m = path.match(/^\/api\/orgs\/([\w-]{1,40})\/logo$/))) return getLogo(request, m[1]);
 

@@ -1,7 +1,7 @@
 // Валути и сметки, изпращане по имейл, оферта през линк, известия и модулът „ЦАИС ЕОП“.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { COMPANY, LINES, setup } from './helpers.js';
+import { COMPANY, LINES, setup, siteOf } from './helpers.js';
 
 const pdfBase64 = Buffer.from('%PDF-1.7 тест').toString('base64');
 const tokenFrom = (mail) => mail.html.match(/offer\.html#t=([\w.-]+)/)[1];
@@ -44,7 +44,7 @@ test('платен план: няколко сметки, фактура в USD 
   assert.equal(issued.data.seller.bankAccounts, undefined);
   const noRate = await call('POST', '/api/documents', { as: 'user@x.bg', body: { docType: 'Фактура', companyId: 'CO-1', lines: LINES, currency: 'GBP' } });
   assert.ok(noRate.data.error.fields.exchangeRate);
-  assert.equal((await store.find('documents', 'id', draft.data.id))[0].exchangeRate, 1.08);
+  assert.equal((await store.forSite(siteOf('ORG-A')).find('documents', 'id', draft.data.id))[0].exchangeRate, 1.08);
 });
 
 test('курс на ЕЦБ', async () => {
@@ -103,7 +103,7 @@ test('оферта: линк в имейла, клиентът я приема, 
   assert.equal((await call('POST', '/api/public/offer/decision', { org: null, body: { token, decision: 'accept' } })).status, 422, 'трябва име');
   const ok = await call('POST', '/api/public/offer/decision', { org: null, body: { token, decision: 'accept', name: 'Иван Петров', note: 'Съгласни сме' } });
   assert.equal(ok.data.status, 'Приета');
-  const [doc] = await store.find('documents', 'id', draft.data.id);
+  const [doc] = await store.forSite(siteOf('ORG-A')).find('documents', 'id', draft.data.id);
   assert.deepEqual([doc.docStatus, doc.decisionBy, doc.decisionNote], ['Приета', 'Иван Петров', 'Съгласни сме']);
   assert.ok(store.sentMail.some((m) => m.to === 'user@x.bg' && /приета/.test(m.subject)));
   assert.equal((await call('POST', '/api/public/offer/decision', { org: null, body: { token, decision: 'reject', name: 'Х' } })).status, 409, 'втори отговор не се приема');
@@ -182,4 +182,63 @@ test('ЦАИС ЕОП: само в плана с модула; списък с �
   // Лятно време: 17:00 българско = 14:00 UTC.
   const summer = await call('POST', '/api/data/tenders', { as: 'user@x.bg', body: { tenderName: 'Лято', authority: 'Y', submissionDeadline: '2027-07-01T17:00' } });
   assert.equal(summer.data.submissionDeadline, '2027-07-01T14:00:00Z');
+});
+
+// --- Отделна база данни (SharePoint сайт) за всяка фирма ---
+
+test('новата фирма получава собствен сайт; докато се подготвя, данните не се отварят', async () => {
+  const { store, call } = setup();
+  // SharePoint създава сайта асинхронно: първо „provisioning“, после „ready“.
+  const sites = new Map();
+  store.siteStatus = async (path) => sites.get(path) || 'missing';
+  store.createSite = async ({ sitePath, owner }) => { sites.set(sitePath, 'provisioning'); store.lastOwner = owner; return 'provisioning'; };
+  const created = await call('POST', '/api/orgs', { as: 'viewer@x.bg', org: null, body: { name: 'Нова ЕООД', eik: '202020204' } });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.dbStatus, 'Подготвя се');
+  const [org] = await store.find('orgs', 'id', created.data.id);
+  assert.equal(org.sitePath, siteOf(created.data.id));
+  assert.equal(store.lastOwner, 'viewer@x.bg');
+  const waiting = await call('GET', '/api/data', { as: 'viewer@x.bg', org: created.data.id });
+  assert.equal(waiting.status, 409);
+  assert.match(waiting.data.error.message, /Подготвяме базата данни/);
+  // Чужд потребител не може да движи подготовката.
+  assert.equal((await call('POST', `/api/orgs/${created.data.id}/provision`, { as: 'other@y.bg', org: null })).status, 403);
+  assert.equal((await call('POST', `/api/orgs/${created.data.id}/provision`, { as: 'viewer@x.bg', org: null })).data.dbStatus, 'Подготвя се');
+  sites.set(org.sitePath, 'ready');
+  const ready = await call('POST', `/api/orgs/${created.data.id}/provision`, { as: 'viewer@x.bg', org: null });
+  assert.equal(ready.data.dbStatus, 'Готова');
+  assert.equal((await store.find('orgs', 'id', created.data.id))[0].dbStatus, 'Готова');
+  // Данните на новата фирма отиват само в нейния сайт.
+  const co = await call('POST', '/api/data/companies', { as: 'viewer@x.bg', org: created.data.id, body: { name: 'Клиент на новата', relation: 'Клиент' } });
+  assert.equal(co.status, 201);
+  assert.equal((await store.forSite(org.sitePath).find('companies', 'id', co.data.id)).length, 1);
+  assert.equal((await store.forSite(siteOf('ORG-A')).find('companies', 'id', co.data.id)).length, 0);
+  assert.equal((await store.find('companies', 'id', co.data.id)).length, 0);
+});
+
+test('грешка при създаването на сайта: БУЛАДМИН е уведомен и само той пуска подготовката отново', async () => {
+  const { store, call } = setup();
+  let status = 'error';
+  store.siteStatus = async () => status;
+  const created = await call('POST', '/api/orgs', { as: 'viewer@x.bg', org: null, body: { name: 'Нова ЕООД', eik: '202020204' } });
+  assert.equal(created.data.dbStatus, 'Грешка');
+  const failed = await call('GET', '/api/data', { as: 'viewer@x.bg', org: created.data.id });
+  assert.equal(failed.status, 409);
+  assert.match(failed.data.error.message, /не беше създадена/);
+  status = 'ready';
+  assert.equal((await call('POST', `/api/orgs/${created.data.id}/provision`, { as: 'viewer@x.bg', org: null })).data.dbStatus, 'Грешка');
+  assert.equal((await call('POST', `/api/orgs/${created.data.id}/provision`, { as: 'staff@buladmin.eu', org: null })).data.dbStatus, 'Готова');
+  const overview = await call('GET', '/api/platform', { as: 'staff@buladmin.eu', org: null });
+  const row = overview.data.orgs.find((o) => o.id === created.data.id);
+  assert.deepEqual([row.dbStatus, row.sitePath], ['Готова', siteOf(created.data.id)]);
+});
+
+test('данните на всяка фирма са в отделен сайт и не се виждат от друга фирма', async () => {
+  const { store, call } = setup();
+  const a = await call('GET', '/api/data', { as: 'admin@x.bg' });
+  assert.deepEqual(a.data.companies.map((c) => c.id), ['CO-1']);
+  const b = await call('GET', '/api/data', { as: 'other@y.bg', org: 'ORG-B' });
+  assert.deepEqual(b.data.companies.map((c) => c.id), ['CO-B']);
+  assert.equal((await call('GET', '/api/data/companies/CO-B', { as: 'admin@x.bg' })).status, 404);
+  assert.equal(store.tables.companies.length, 0);
 });

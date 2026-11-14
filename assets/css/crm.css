@@ -203,3 +203,11 @@ fieldset.field > legend { font-weight: 600; margin-bottom: 8px; }
 .pill[data-stage="Подадена"], .pill[data-stage="Оценка"] { background: var(--info-bg); color: var(--info-ink); border-color: var(--info-line); }
 .pill[data-stage="Класирана първа"], .pill[data-stage="Договор"] { background: var(--ok-bg); color: var(--ok); border-color: var(--ok-line); }
 .pill[data-stage="Неуспешна"], .pill[data-stage="Отказ от участие"], .pill[data-stage="Прекратена"] { background: var(--err-bg); color: var(--error); border-color: var(--err-line); }
+
+/* Подготовка на отделната база данни на нова фирма */
+.narrow-card { max-width: 560px; margin: 24px auto; }
+.progress { height: 6px; border-radius: 99px; background: var(--tint); overflow: hidden; }
+.progress > span { display: block; width: 35%; height: 100%; border-radius: inherit; background: var(--gold); animation: progress-slide 1.6s ease-in-out infinite; }
+@keyframes progress-slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+@media (prefers-reduced-motion: reduce) { .progress > span { animation: none; width: 100%; opacity: .5; } }
+.tag--warn { background: var(--warn-bg); color: var(--warn-ink); }

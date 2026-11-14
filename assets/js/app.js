@@ -1,8 +1,8 @@
 import {
   api, confirmDialog, downloadCsv, emptyState, fatal, field, formatDate, formatTime, formDialog, formValues, h, icon, linkBox,
   money, mountShell, norm, num, pageHead, parseNum, pill, round2, selectField, setOrg, showError, showFieldErrors, timeAgo, toast, today,
-} from './core.js?v=34a913be9f';
-import { buildPdf, saveFile } from './pdf.js?v=34a913be9f';
+} from './core.js?v=c248056f63';
+import { buildPdf, saveFile } from './pdf.js?v=c248056f63';
 
 let shell;
 let main;
@@ -242,7 +242,7 @@ function viewDashboard() {
         h('span', { class: d.dueDate < today() ? 'text-error' : '' }, money(outstanding(d))))), 'Няма неплатени фактури.')),
     h('div', { class: 'grid-2' },
       panel('Сделки в процес', '#/deals', [...openDeals].sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0)).slice(0, 8)
-        .map((d) => compactRow(`#/deals/${d.id}`, d.title, `${titleOf('companies', find('companies', d.companyId))} · ${d.stage}`, h('span', {}, money(d.amount)))),
+        .map((d) => compactRow(`#/deals/${d.id}`, d.dealName, `${titleOf('companies', find('companies', d.companyId))} · ${d.stage}`, h('span', {}, money(d.amount)))),
       'Няма отворени сделки.'),
       panel('Нови контрагенти', '#/companies', [...data.companies].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 8)
         .map((c) => compactRow(`#/companies/${c.id}`, c.name, [c.relation, c.city].filter(Boolean).join(' · '), h('span', { class: 'small muted' }, timeAgo(c.createdAt)))),
@@ -440,7 +440,7 @@ async function viewRecord(entity, id) {
     content.push(
       relatedCard('Лица за контакт', 'contacts', data.contacts.filter((c) => c.companyId === id), ['firstName', 'position', 'phone', 'email'],
         addButton('Ново лице', async () => { if (await editRecord('contacts', null, presets)) route(); })),
-      relatedCard('Сделки', 'deals', data.deals.filter((d) => d.companyId === id), ['title', 'stage', 'amount', 'expectedClose'],
+      relatedCard('Сделки', 'deals', data.deals.filter((d) => d.companyId === id), ['dealName', 'stage', 'amount', 'expectedClose'],
         addButton('Нова сделка', async () => { if (await editRecord('deals', null, presets)) route(); })),
       relatedCard('Задачи', 'activities', data.activities.filter((a) => a.companyId === id), ['subject', 'dueDate', 'activityStatus', 'assignedTo'],
         addButton('Нова задача', async () => { if (await editRecord('activities', null, presets)) route(); })),
@@ -510,13 +510,13 @@ function viewDeals(query) {
     return h('section', { class: 'board__col', 'data-stage': stage, 'aria-label': stage },
       h('header', { class: 'board__head' }, h('strong', {}, stage), h('span', { class: 'small muted' }, `${deals.length} · ${money(deals.reduce((s, d) => s + (Number(d.amount) || 0), 0))}`)),
       h('div', { class: 'board__cards' }, deals.map((d) => h('article', { class: 'deal-card' },
-        h('a', { class: 'deal-card__title', href: `#/deals/${d.id}` }, d.title),
+        h('a', { class: 'deal-card__title', href: `#/deals/${d.id}` }, d.dealName),
         h('span', { class: 'small muted' }, titleOf('companies', find('companies', d.companyId))),
         h('div', { class: 'deal-card__foot' },
           h('strong', {}, money(d.amount)),
           d.expectedClose && h('span', { class: `small ${OPEN_STAGES.includes(d.stage) && d.expectedClose < today() ? 'text-error' : 'muted'}` }, formatDate(d.expectedClose))),
         canEdit() && h('select', {
-          class: 'deal-card__move', 'aria-label': `Етап на „${d.title}“`,
+          class: 'deal-card__move', 'aria-label': `Етап на „${d.dealName}“`,
           onchange: (event) => act(() => api(`/data/deals/${d.id}`, { method: 'PATCH', body: { stage: event.target.value } }), `Етап: ${event.target.value}`).then(() => viewDeals(query)),
         }, stages.map((s) => h('option', { value: s, selected: s === d.stage }, s)))))));
   }));
@@ -701,7 +701,9 @@ function documentEditor(doc, query) {
   };
   if (!doc && values.dealId && !values.lines.length) {
     const deal = find('deals', values.dealId);
-    if (deal?.amount) values.lines = [{ productId: '', name: deal.title, qty: 1, unit: 'бр.', price: deal.amount, discount: '', vatRate: data.company.vatRegistered === 'Не' ? 0 : 20 }];
+    // Документ към сделка е винаги към нейния контрагент.
+    if (deal) values.companyId = deal.companyId;
+    if (deal?.amount) values.lines = [{ productId: '', name: deal.dealName, qty: 1, unit: 'бр.', price: deal.amount, discount: '', vatRate: data.company.vatRegistered === 'Не' ? 0 : 20 }];
   }
   const totalsBox = h('div');
   const showTotals = (lines) => totalsBox.replaceChildren(totalsBlock(totalsOf(lines, docType)));
@@ -710,8 +712,8 @@ function documentEditor(doc, query) {
   const alert = h('div', { 'aria-live': 'polite' });
   const companies = [...data.companies].sort((a, b) => a.name.localeCompare(b.name, 'bg'));
   const dealSelect = h('select', { id: 'f-dealId', name: 'dealId' });
-  const fillDeals = (companyId) => dealSelect.replaceChildren(h('option', { value: '' }, '—'),
-    data.deals.filter((d) => !companyId || d.companyId === companyId).map((d) => h('option', { value: d.id, selected: d.id === values.dealId }, d.title)));
+  const fillDeals = (companyId) => fill(dealSelect, h('option', { value: '' }, '—'),
+    data.deals.filter((d) => !companyId || d.companyId === companyId).map((d) => h('option', { value: d.id, selected: d.id === values.dealId }, d.dealName)));
   fillDeals(values.companyId);
   const companySelect = h('select', { id: 'f-companyId', name: 'companyId', onchange: (e) => fillDeals(e.target.value) },
     h('option', { value: '' }, 'Изберете контрагент…'), companies.map((c) => h('option', { value: c.id, selected: c.id === values.companyId }, c.name)));

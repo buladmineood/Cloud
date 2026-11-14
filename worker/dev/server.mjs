@@ -68,10 +68,10 @@ const seed = {
     { id: 'CT-DEMO0002', firstName: 'Петя', lastName: 'Георгиева', companyId: 'CO-DEMO0002', position: 'Финансов директор', phone: '+359 878 555 111', email: 'petya@targovia.example', notes: '', ...stamp(12) },
   ],
   deals: [
-    { id: 'DL-DEMO0001', title: 'Годишен договор за счетоводство', companyId: 'CO-DEMO0002', contactId: 'CT-DEMO0002', stage: 'Оферта', amount: 3600, expectedClose: day(14), owner: 'admin@buladmin.eu', lostReason: '', notes: '', closedAt: '', ...stamp(10) },
-    { id: 'DL-DEMO0002', title: 'Регистрация на ДДС', companyId: 'CO-DEMO0001', contactId: 'CT-DEMO0001', stage: 'Преговори', amount: 450, expectedClose: day(5), owner: 'sales@buladmin.eu', lostReason: '', notes: '', closedAt: '', ...stamp(6) },
-    { id: 'DL-DEMO0003', title: 'Абонамент 2026', companyId: 'CO-DEMO0001', contactId: '', stage: 'Спечелена', amount: 3000, expectedClose: day(-20), owner: 'sales@buladmin.eu', lostReason: '', notes: '', closedAt: at(20), ...stamp(40) },
-    { id: 'DL-DEMO0004', title: 'Обучение по ТРЗ', companyId: 'CO-DEMO0002', contactId: '', stage: 'Нова', amount: 800, expectedClose: '', owner: 'sales@buladmin.eu', lostReason: '', notes: '', closedAt: '', ...stamp(2) },
+    { id: 'DL-DEMO0001', dealName: 'Годишен договор за счетоводство', companyId: 'CO-DEMO0002', contactId: 'CT-DEMO0002', stage: 'Оферта', amount: 3600, expectedClose: day(14), owner: 'admin@buladmin.eu', lostReason: '', notes: '', closedAt: '', ...stamp(10) },
+    { id: 'DL-DEMO0002', dealName: 'Регистрация на ДДС', companyId: 'CO-DEMO0001', contactId: 'CT-DEMO0001', stage: 'Преговори', amount: 450, expectedClose: day(5), owner: 'sales@buladmin.eu', lostReason: '', notes: '', closedAt: '', ...stamp(6) },
+    { id: 'DL-DEMO0003', dealName: 'Абонамент 2026', companyId: 'CO-DEMO0001', contactId: '', stage: 'Спечелена', amount: 3000, expectedClose: day(-20), owner: 'sales@buladmin.eu', lostReason: '', notes: '', closedAt: at(20), ...stamp(40) },
+    { id: 'DL-DEMO0004', dealName: 'Обучение по ТРЗ', companyId: 'CO-DEMO0002', contactId: '', stage: 'Нова', amount: 800, expectedClose: '', owner: 'sales@buladmin.eu', lostReason: '', notes: '', closedAt: '', ...stamp(2) },
   ],
   activities: [
     { id: 'AC-DEMO0001', subject: 'Обаждане за обратна връзка по офертата', activityType: 'Обаждане', dueDate: day(0), activityStatus: 'Предстои', assignedTo: 'admin@buladmin.eu', companyId: 'CO-DEMO0002', dealId: 'DL-DEMO0001', notes: '', doneAt: '', createdBy: 'admin@buladmin.eu', ...stamp(3) },

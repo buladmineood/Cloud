@@ -143,10 +143,10 @@
     "generic": true,
     "label": "Сделки",
     "single": "Сделка",
-    "display": "title",
+    "display": "dealName",
     "columns": [
       { "name": "orgId", "label": "Организация", "kind": "text", "indexed": true, "system": true, "hidden": true },
-      { "name": "title", "label": "Сделка", "kind": "text", "required": true, "list": true },
+      { "name": "dealName", "label": "Сделка", "kind": "text", "required": true, "list": true },
       { "name": "companyId", "label": "Контрагент", "kind": "text", "input": "ref", "ref": "companies", "required": true, "indexed": true, "list": true },
       { "name": "contactId", "label": "Лице за контакт", "kind": "text", "input": "ref", "ref": "contacts", "indexed": true },
       { "name": "stage", "label": "Етап", "kind": "choice", "choices": ["Нова", "Квалифицирана", "Оферта", "Преговори", "Спечелена", "Загубена"], "indexed": true, "list": true, "default": "Нова" },

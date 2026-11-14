@@ -106,7 +106,7 @@ test('потребител от една организация не вижда 
   assert.deepEqual(data.data.companies.map((c) => c.id), ['CO-1']);
   assert.equal(data.data.companies[0].orgId, undefined);
   assert.equal((await call('PATCH', '/api/data/companies/CO-B', { as: 'admin@x.bg', body: { city: 'Х' } })).status, 404);
-  const deal = await call('POST', '/api/data/deals', { as: 'admin@x.bg', body: { title: 'Х', companyId: 'CO-B' } });
+  const deal = await call('POST', '/api/data/deals', { as: 'admin@x.bg', body: { dealName: 'Х', companyId: 'CO-B' } });
   assert.equal(deal.status, 422);
   const doc = await call('POST', '/api/documents', { as: 'admin@x.bg', body: { docType: 'Фактура', companyId: 'CO-B', lines: LINES } });
   assert.equal(doc.status, 422);
@@ -315,4 +315,24 @@ test('еднократният линк се пази само като хеш',
   const token = res.data.link.split('#t=')[1];
   const [u] = await store.find('users', 'id', 'user@x.bg');
   assert.equal(u.resetTokenHash, b64url(await sha256(token)));
+});
+
+test('имената на колоните не съвпадат с вградените полета в SharePoint', async () => {
+  // SharePoint преименува такава колона (напр. title → title0) и записът се отказва.
+  const schema = (await import('../src/schema.json', { with: { type: 'json' } })).default;
+  const reserved = ['title', 'id', 'created', 'modified', 'author', 'editor', 'attachments', 'contenttype', 'linktitle'];
+  for (const [table, def] of Object.entries(schema)) {
+    for (const c of def.columns) assert.ok(!reserved.includes(c.name.toLowerCase()), `${table}.${c.name}`);
+  }
+});
+
+test('сделка: създаване, етап и дата на приключване', async () => {
+  const { call } = setup();
+  const deal = await call('POST', '/api/data/deals', { as: 'user@x.bg', body: { dealName: 'Сделка', companyId: 'CO-1', amount: '1 200,50' } });
+  assert.equal(deal.status, 201);
+  assert.equal(deal.data.dealName, 'Сделка');
+  assert.equal(deal.data.amount, 1200.5);
+  assert.equal(deal.data.stage, 'Нова');
+  const won = await call('PATCH', `/api/data/deals/${deal.data.id}`, { as: 'user@x.bg', body: { stage: 'Спечелена' } });
+  assert.ok(won.data.closedAt);
 });

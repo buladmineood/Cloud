@@ -92,6 +92,12 @@ for (const [key, def] of Object.entries(schema)) {
       console.log(`    нова колона: ${column.label}`);
     }
   }
+  // По-рано сделката имаше колона „title“, която SharePoint не позволява (съвпада с вградената Title)
+  // и вместо нея създаваше title0, title1… Тези колони не се използват и се махат.
+  for (const stray of columns.filter((c) => /^title\d+$/.test(c.name) && !def.columns.some((d) => d.name === c.name))) {
+    await graph(`/sites/${site.id}/lists/${list.id}/columns/${stray.id}`, 'DELETE');
+    console.log(`    премахната излишна колона: ${stray.name} (${stray.displayName})`);
+  }
   const title = columns.find((c) => c.name === 'Title');
   if (title && (!title.indexed || title.displayName !== def.titleLabel)) {
     await graph(`/sites/${site.id}/lists/${list.id}/columns/${title.id}`, 'PATCH', { indexed: true, displayName: def.titleLabel });

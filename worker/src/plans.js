@@ -37,14 +37,26 @@ export const limitOf = (plan, key) => {
   return value === '' || value === null || value === undefined ? Infinity : Number(value);
 };
 
+export const defaultPlan = (plans) => plans.find((p) => p.isDefault === 'Да') || plans[0];
+
 // Платеният план важи до planUntil включително; след това организацията минава на плана по подразбиране.
+// Изключение са фирмите „само с платен план“ (втора и следваща фирма в профил): те остават на плана си,
+// но достъпът до тях спира, докато абонаментът не бъде платен (виж paymentDue).
 export function effectivePlan(org, plans, today) {
-  const fallback = plans.find((p) => p.isDefault === 'Да') || plans[0];
+  const fallback = defaultPlan(plans);
   const plan = plans.find((p) => p.id === org.planId);
   if (!plan) return fallback;
+  if (org.paidOnly === 'Да') return plan;
   if (org.planUntil && org.planUntil < today && plan.id !== fallback.id) return fallback;
   return plan;
 }
+
+// Фирмата чака плащане: още не е активирана или платеният ѝ период е изтекъл, а безплатен план няма.
+export const paymentDue = (org, today) => org.orgStatus === 'Чака плащане'
+  || (org.paidOnly === 'Да' && !!org.planUntil && org.planUntil < today);
+
+// Плановете, които могат да се изберат за фирма само с платен план.
+export const paidPlans = (plans) => plans.filter((p) => p.isActive === 'Да' && p.isDefault !== 'Да');
 
 const OPEN_STAGES = ['Нова', 'Квалифицирана', 'Оферта', 'Преговори'];
 

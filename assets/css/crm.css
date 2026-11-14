@@ -161,3 +161,14 @@ td .tag { display: inline-block; margin: 2px 4px 2px 0; text-decoration: none; }
 .plan .details { grid-template-columns: minmax(0, 1fr) auto; }
 .plan .details dd { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .usage td.num { white-space: nowrap; }
+
+/* Избор на план при регистрация */
+.plan-options { display: grid; gap: 8px; }
+.plan-option { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); cursor: pointer; }
+.plan-option:has(input:checked) { border-color: var(--navy); box-shadow: inset 0 0 0 1px var(--navy); background: var(--tint); }
+.plan-option input { margin-top: 4px; accent-color: var(--navy); }
+.plan-option__body { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.plan-option__head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.plan-option__price { font-weight: 650; white-space: nowrap; }
+.text-warn { color: var(--warn-ink); font-weight: 600; }
+fieldset.field > legend { font-weight: 600; margin-bottom: 8px; }

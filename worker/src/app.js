@@ -7,7 +7,7 @@ import {
 import { renderEmail } from './email.js';
 import { beginLogin, completeLogin, isProvider } from './oauth.js';
 import {
-  DEFAULT_PLANS, DOC_LIMIT, effectivePlan, ENTITY_LIMIT, LIMITS, limitOf, PLAN_NUMBERS, usageOf,
+  DEFAULT_PLANS, defaultPlan, DOC_LIMIT, effectivePlan, ENTITY_LIMIT, LIMITS, limitOf, paidPlans, paymentDue, PLAN_NUMBERS, usageOf,
 } from './plans.js';
 import schema from './schema.json' with { type: 'json' };
 import {
@@ -127,6 +127,14 @@ function publicPlan(p) {
 }
 
 const companyOf = (org) => Object.fromEntries(COMPANY_FIELDS.map((k) => [k, org[k] ?? DEFAULT_COMPANY[k]]));
+
+function paymentMessage(org, plan) {
+  const price = plan.price === '' || plan.price === undefined ? '' : ` (${Number(plan.price).toFixed(2)} € на месец)`;
+  const reason = org.orgStatus === 'Чака плащане'
+    ? `„${org.name}“ не е първата фирма в профила и е с платен абонамент „${plan.name}“${price}.`
+    : `Платеният абонамент „${plan.name}“ на „${org.name}“ е изтекъл.`;
+  return `${reason} Фирмата ще бъде активирана след плащане: БУЛАДМИН ще Ви изпрати проформа фактура. Въпроси: call@buladmin.eu.`;
+}
 
 export function createApp({ env, store, fetchImpl = (...args) => fetch(...args), now = () => new Date() }) {
   const nowIso = () => now().toISOString().replace(/\.\d+Z$/, 'Z');
@@ -281,8 +289,10 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (org.orgStatus === 'Спряна' && !platform) {
       throw new HttpError(403, 'Достъпът до организацията е спрян. Свържете се с БУЛАДМИН.');
     }
+    const plan = effectivePlan(org, await loadPlans(), today());
+    if (paymentDue(org, today()) && !platform) throw new HttpError(402, paymentMessage(org, plan));
     const memberRole = member?.isActive === 'Да' ? member.role : ADMIN;
-    const ctx = { user, org, role: memberRole, platform: platform && memberRole !== member?.role, plan: effectivePlan(org, await loadPlans(), today()) };
+    const ctx = { user, org, role: memberRole, platform: platform && memberRole !== member?.role, plan };
     if (role === 'editor' && ctx.role === VIEWER) throw new HttpError(403, 'Вашият достъп е само за преглед.');
     if (role === 'admin' && ctx.role !== ADMIN) throw new HttpError(403, 'Това действие е само за администратор на организацията.');
     return ctx;
@@ -583,7 +593,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       user: publicUser(user),
       security: { password: !!user.passwordHash, google: !!user.googleId, microsoft: !!user.microsoftId },
       orgs: memberships.map(({ member, org }) => ({
-        id: org.id, name: org.name, role: member.role, status: org.orgStatus, plan: effectivePlan(org, plans, today()).name,
+        id: org.id, name: org.name, role: member.role, status: paymentDue(org, today()) ? 'Чака плащане' : org.orgStatus, plan: effectivePlan(org, plans, today()).name,
       })),
     });
   }
@@ -1055,31 +1065,71 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     await Promise.all(admins.map((a) => sendMail(a.id, subject, { title: subject, paragraphs, action: { label: 'Отворете', url } })));
   }
 
+  // Безплатният план е само за първата фирма в профила. Всяка следваща е с платен абонамент
+  // и започва със статус „Чака плащане“, докато БУЛАДМИН не я активира.
+  async function hasOwnOrg(user) {
+    const [created, members] = await Promise.all([
+      store.list('orgs').then((orgs) => orgs.filter((o) => o.createdBy === user.id)),
+      store.find('members', 'userId', user.id),
+    ]);
+    return created.length > 0 || members.some((m) => m.role === ADMIN && m.isActive === 'Да');
+  }
+
+  // Какво може да избере потребителят при регистрация на фирма.
+  async function registrationOptions(request) {
+    const user = await requireUser(request);
+    const plans = await loadPlans();
+    const freeAllowed = isPlatformAdmin(user) || !(await hasOwnOrg(user));
+    return json({
+      freeAllowed,
+      platform: isPlatformAdmin(user),
+      defaultPlan: publicPlan(defaultPlan(plans)),
+      paidPlans: paidPlans(plans).map(publicPlan),
+    });
+  }
+
   async function createOrg(request, ctx) {
     const user = await requireUser(request);
-    const { values, errors } = validateCompany(await readBody(request));
+    const body = await readBody(request);
+    const { values, errors } = validateCompany(body);
+    const plans = await loadPlans();
+    const platform = isPlatformAdmin(user);
+    const freeAllowed = platform || !(await hasOwnOrg(user));
+    const free = defaultPlan(plans);
+    const requested = clean(body.planId, 40);
+    let plan = free;
+    if (platform) {
+      plan = plans.find((p) => p.id === requested) || free;
+    } else if (!freeAllowed) {
+      plan = paidPlans(plans).find((p) => p.id === requested);
+      if (!plan) errors.planId = 'Втората и всяка следваща фирма в профила е с платен абонамент. Изберете план.';
+    }
     failIfErrors(errors);
     const duplicate = (await store.find('orgs', 'eik', values.eik)).find((o) => o.orgStatus !== 'Спряна');
     if (duplicate) {
       throw new HttpError(409, 'Фирма с този ЕИК вече е регистрирана. Помолете нейния администратор да Ви покани.', { eik: 'Вече е регистрирана.' });
     }
-    const plans = await loadPlans();
-    const plan = plans.find((p) => p.isDefault === 'Да') || plans[0];
+    const pending = !freeAllowed;
     const org = {
       id: newId('orgs'), ...values, invoiceStart: values.invoiceStart || '1', dueDays: values.dueDays || '7',
-      planId: plan.id, orgStatus: 'Активна', createdBy: user.id, createdAt: nowIso(), updatedAt: nowIso(),
+      planId: plan.id, orgStatus: pending ? 'Чака плащане' : 'Активна', paidOnly: pending ? 'Да' : 'Не',
+      createdBy: user.id, createdAt: nowIso(), updatedAt: nowIso(),
     };
     await store.create('orgs', org);
     await store.create('members', {
       id: memberId(org.id, user.id), orgId: org.id, userId: user.id, role: ADMIN, isActive: 'Да', invitedBy: user.id, createdAt: nowIso(),
     });
-    await audit({ user, org }, 'orgs', org.id, 'Регистрация на организация', `${org.name}, ЕИК ${org.eik}`);
-    const work = notifyPlatform(`Нова организация: ${org.name}`, [
+    await audit({ user, org }, 'orgs', org.id, 'Регистрация на организация', `${org.name}, ЕИК ${org.eik}, план „${plan.name}“${pending ? ', чака плащане' : ''}`);
+    const price = plan.price === '' || plan.price === undefined ? 'цената не е зададена' : `${Number(plan.price).toFixed(2)} EUR на месец`;
+    const work = notifyPlatform(pending ? `Чака плащане: ${org.name}` : `Нова организация: ${org.name}`, [
       `${user.fullName || user.id} (${user.id}) регистрира „${org.name}“, ЕИК ${org.eik}, на план „${plan.name}“.`,
-    ], `${env.APP_ORIGIN}/app.html#/platform/orgs/${org.id}`).catch((err) => console.error('notify failed', err.message));
+      pending
+        ? `Това не е първата фирма в профила, затова е с платен абонамент (${price}). Изпратете проформа фактура и след плащането активирайте фирмата от „Организации“ със срок „Платен до“.`
+        : '',
+    ].filter(Boolean), `${env.APP_ORIGIN}/app.html#/platform/orgs/${org.id}`).catch((err) => console.error('notify failed', err.message));
     if (ctx?.waitUntil) ctx.waitUntil(work);
     else await work;
-    return json({ id: org.id, name: org.name }, 201);
+    return json({ id: org.id, name: org.name, status: org.orgStatus, plan: plan.name }, 201);
   }
 
   // --- Администрация на организацията ---
@@ -1224,7 +1274,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
         return {
           ...companyOf(o),
           id: o.id,
-          status: o.orgStatus,
+          status: paymentDue(o, today()) && o.orgStatus === 'Активна' ? 'Чака плащане' : o.orgStatus,
+          paidOnly: o.paidOnly === 'Да',
           planId: o.planId,
           effectivePlan: plan.id,
           planUntil: o.planUntil || '',
@@ -1263,10 +1314,18 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       if (patch.planUntil && !isValidDay(patch.planUntil)) errors.planUntil = 'Невалидна дата.';
     }
     if (body.status !== undefined) {
-      if (!['Активна', 'Спряна'].includes(body.status)) errors.status = 'Невалиден статус.';
+      if (!['Активна', 'Чака плащане', 'Спряна'].includes(body.status)) errors.status = 'Невалиден статус.';
       else patch.orgStatus = body.status;
     }
     if (body.adminNotes !== undefined) patch.adminNotes = clean(body.adminNotes, MAX_MULTILINE, { multiline: true });
+    if (body.paidOnly !== undefined) patch.paidOnly = body.paidOnly === true || body.paidOnly === 'Да' ? 'Да' : 'Не';
+    // Фирма само с платен план не може да е активна на безплатния план.
+    const plans = await loadPlans();
+    const finalPlan = patch.planId ?? org.planId;
+    const finalPaidOnly = patch.paidOnly ?? org.paidOnly;
+    if (finalPaidOnly === 'Да' && (patch.orgStatus ?? org.orgStatus) === 'Активна' && finalPlan === defaultPlan(plans).id) {
+      errors.planId = 'Тази фирма не е първата в профила: изберете платен план или махнете отметката „Само с платен план“.';
+    }
     failIfErrors(errors);
     if (!Object.keys(patch).length) return json({ ok: true });
     patch.updatedAt = nowIso();
@@ -1391,6 +1450,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (method === 'POST' && (m = path.match(/^\/api\/account\/link\/(\w+)$/)) && isProvider(m[1])) return linkStart(request, m[1]);
     if (method === 'POST' && (m = path.match(/^\/api\/account\/unlink\/(\w+)$/)) && isProvider(m[1])) return unlink(request, m[1]);
 
+    if (method === 'GET' && path === '/api/orgs/options') return registrationOptions(request);
     if (method === 'POST' && path === '/api/orgs') return createOrg(request, ctx);
     if (method === 'GET' && (m = path.match(/^\/api\/orgs\/([\w-]{1,40})\/logo$/))) return getLogo(request, m[1]);
 

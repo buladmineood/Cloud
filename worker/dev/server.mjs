@@ -110,7 +110,7 @@ const member = (orgId, userId, role) => ({ id: `${orgId}:${userId}`, orgId, user
 seed.members = [
   member(ORG, 'admin@buladmin.eu', 'Администратор'), member(ORG, 'sales@buladmin.eu', 'Потребител'),
   member(ORG, 'viewer@buladmin.eu', 'Наблюдател'), member(ORG, 'nov@buladmin.eu', 'Потребител'),
-  member('ORG-DEMO0002', 'admin@buladmin.eu', 'Администратор'),
+  member('ORG-DEMO0002', 'admin@buladmin.eu', 'Администратор'), member('ORG-DEMO0002', 'sales@buladmin.eu', 'Администратор'),
 ];
 const store = new MemoryStore(seed);
 const app = createApp({ env, store });

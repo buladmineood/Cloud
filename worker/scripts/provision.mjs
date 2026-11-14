@@ -84,12 +84,16 @@ for (const [key, def] of Object.entries(schema)) {
   listIds[key] = list.id;
 
   // Колоната Title пази уникалния номер: индексира се, за да може да се търси по нея.
-  const { value: columns } = await graph(`/sites/${site.id}/lists/${list.id}/columns?$select=id,name,indexed,displayName`);
-  // Новите колони от schema.json се добавят и към вече създадени таблици.
+  const { value: columns } = await graph(`/sites/${site.id}/lists/${list.id}/columns?$select=id,name,indexed,displayName,choice`);
+  // Новите колони от schema.json се добавят и към вече създадени таблици, а новите стойности за избор — към съществуващите.
   for (const column of def.columns) {
-    if (!columns.some((c) => c.name === column.name)) {
+    const current = columns.find((c) => c.name === column.name);
+    if (!current) {
       await graph(`/sites/${site.id}/lists/${list.id}/columns`, 'POST', columnDefinition(column));
       console.log(`    нова колона: ${column.label}`);
+    } else if (column.kind === 'choice' && current.choice && column.choices.join('|') !== (current.choice.choices || []).join('|')) {
+      await graph(`/sites/${site.id}/lists/${list.id}/columns/${current.id}`, 'PATCH', { choice: { ...current.choice, choices: column.choices } });
+      console.log(`    нови стойности за „${column.label}“: ${column.choices.join(', ')}`);
     }
   }
   // По-рано сделката имаше колона „title“, която SharePoint не позволява (съвпада с вградената Title)

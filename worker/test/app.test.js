@@ -95,7 +95,7 @@ test('регистрация, нова организация на безпла�
   const [created] = await store.find('orgs', 'id', ok.data.id);
   assert.equal(created.planId, 'free');
   assert.equal((await store.find('members', 'id', `${ok.data.id}:new@firm.bg`))[0].role, 'Администратор');
-  const dup = await call('POST', '/api/orgs', { body: { name: 'Пак', eik: '202020204' }, headers: { cookie }, org: null });
+  const dup = await call('POST', '/api/orgs', { body: { name: 'Пак', eik: '202020204', planId: 'standard' }, headers: { cookie }, org: null });
   assert.equal(dup.status, 409);
 });
 
@@ -335,4 +335,49 @@ test('сделка: създаване, етап и дата на приключ
   assert.equal(deal.data.stage, 'Нова');
   const won = await call('PATCH', `/api/data/deals/${deal.data.id}`, { as: 'user@x.bg', body: { stage: 'Спечелена' } });
   assert.ok(won.data.closedAt);
+});
+
+test('втора фирма в профила: само с платен план и чака плащане', async () => {
+  const { store, call } = setup();
+  // admin@x.bg вече е администратор на ORG-A, затова не може да вземе безплатния план за нова фирма.
+  const options = await call('GET', '/api/orgs/options', { as: 'admin@x.bg', org: null });
+  assert.equal(options.data.freeAllowed, false);
+  assert.ok(options.data.paidPlans.every((p) => p.id !== 'free'));
+  const noPlan = await call('POST', '/api/orgs', { as: 'admin@x.bg', org: null, body: { name: 'Втора ЕООД', eik: '202020204' } });
+  assert.equal(noPlan.status, 422);
+  assert.ok(noPlan.data.error.fields.planId);
+  const freeTry = await call('POST', '/api/orgs', { as: 'admin@x.bg', org: null, body: { name: 'Втора ЕООД', eik: '202020204', planId: 'free' } });
+  assert.equal(freeTry.status, 422);
+  const created = await call('POST', '/api/orgs', { as: 'admin@x.bg', org: null, body: { name: 'Втора ЕООД', eik: '202020204', planId: 'standard' } });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.status, 'Чака плащане');
+  const [org] = await store.find('orgs', 'id', created.data.id);
+  assert.deepEqual([org.planId, org.paidOnly], ['standard', 'Да']);
+  // Докато не е платена, фирмата не се отваря, а /api/me показва статуса.
+  const blocked = await call('GET', '/api/data', { as: 'admin@x.bg', org: created.data.id });
+  assert.equal(blocked.status, 402);
+  assert.match(blocked.data.error.message, /платен абонамент „Стандартен“/);
+  assert.equal((await call('GET', '/api/me', { as: 'admin@x.bg' })).data.orgs.find((o) => o.id === created.data.id).status, 'Чака плащане');
+  // БУЛАДМИН не може да я пусне на безплатния план, но може да я активира с платен.
+  assert.equal((await call('PATCH', `/api/platform/orgs/${created.data.id}`, { as: 'staff@buladmin.eu', org: null, body: { status: 'Активна', planId: 'free' } })).status, 422);
+  assert.equal((await call('PATCH', `/api/platform/orgs/${created.data.id}`, { as: 'staff@buladmin.eu', org: null, body: { status: 'Активна', planUntil: '2026-12-31' } })).status, 200);
+  assert.equal((await call('GET', '/api/data', { as: 'admin@x.bg', org: created.data.id })).status, 200);
+});
+
+test('изтекъл абонамент на втора фирма не пада на безплатния план', async () => {
+  const { call } = setup({
+    orgs: [{ id: 'ORG-A', ...COMPANY, planId: 'standard', planUntil: '2026-11-01', paidOnly: 'Да', orgStatus: 'Активна' }],
+  });
+  const res = await call('GET', '/api/data', { as: 'admin@x.bg' });
+  assert.equal(res.status, 402);
+  assert.match(res.data.error.message, /изтекъл/);
+});
+
+test('първата фирма в профила е безплатна', async () => {
+  const { call } = setup();
+  const options = await call('GET', '/api/orgs/options', { as: 'viewer@x.bg', org: null });
+  assert.equal(options.data.freeAllowed, true);
+  const created = await call('POST', '/api/orgs', { as: 'viewer@x.bg', org: null, body: { name: 'Моя ЕООД', eik: '202020204' } });
+  assert.equal(created.data.status, 'Активна');
+  assert.equal(created.data.plan, 'Безплатен');
 });

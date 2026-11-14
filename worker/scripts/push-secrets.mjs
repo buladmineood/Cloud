@@ -4,7 +4,9 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const NAMES = ['SESSION_SECRET', 'PASSWORD_PEPPER', 'GOOGLE_CLIENT_SECRET', 'MS_CERT_PRIVATE_KEY'];
+const NAMES = ['SESSION_SECRET', 'PASSWORD_PEPPER', 'MS_CERT_PRIVATE_KEY'];
+// Без тайната на Google входът с Google връща към началната страница, а всичко останало работи.
+const OPTIONAL = ['GOOGLE_CLIENT_SECRET'];
 const vars = Object.fromEntries(
   readFileSync(new URL('../.dev.vars', import.meta.url), 'utf8')
     .split(/\r?\n/)
@@ -15,7 +17,7 @@ const vars = Object.fromEntries(
     }),
 );
 
-for (const name of NAMES) {
+for (const name of [...NAMES, ...OPTIONAL.filter((n) => vars[n])]) {
   if (!vars[name]) throw new Error(`Липсва ${name} в .dev.vars`);
   const result = spawnSync('npx', ['wrangler@4', 'secret', 'put', name], {
     cwd: fileURLToPath(new URL('..', import.meta.url)),

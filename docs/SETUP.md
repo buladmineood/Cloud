@@ -1,29 +1,35 @@
 # Настройка на BulAdmin CRM / ERP
 
-Системата използва същото Microsoft приложение (`cd4ae5dd-...`), същия сертификат и същия Google клиент като портала. Данните са в отделен SharePoint сайт, за да може достъпът до тях да се управлява отделно от портала.
+Microsoft 365 частта е **настроена на 14 ноември 2026 г.** Стъпки 0–2 и 6 са за повторна настройка или нова среда.
+
+| Какво | Стойност |
+|---|---|
+| Приложение в Entra | „BULADMIN Cloud“, Application ID `0f8a9dda-96cf-44ef-a92d-34804ad51d18` (отделно от това на портала) |
+| Вход с Microsoft | служебни акаунти (`AzureADMultipleOrgs`), одобрен за цялата организация, без екран за съгласие |
+| Сертификат | `CN=BULADMIN Cloud`, валиден до 14 ноември 2028 г. |
+| SharePoint | https://bulmaileu.sharepoint.com/sites/cloud, приложението има `write` само върху него (`Sites.Selected`) |
+| Поща | `no-reply@cloud.buladmin.eu` (споделена кутия), Exchange RBAC само за нея, DKIM включен |
+| Първи администратор | cvetkov@bulmail.eu |
 
 ## 0. Тайни
 
-Частите, които не са в Git, са в `worker/.dev.vars` и `worker/.secrets/`:
+Частите, които не са в Git, са в `worker/.dev.vars` и `worker/.secrets/`. Създава ги:
 
 ```
-worker/.dev.vars
-  SESSION_SECRET=<нов случаен низ, поне 32 знака>
-  PASSWORD_PEPPER=<нов случаен низ, поне 32 знака>
-  GOOGLE_CLIENT_SECRET=<същият като в портала>
-  MS_CERT_PRIVATE_KEY=<същият като в портала>
-worker/.secrets/buladmin-portal.cer   (копие от портала)
+powershell -ExecutionPolicy Bypass -File worker\scripts\new-certificate.ps1
 ```
 
-`SESSION_SECRET` и `PASSWORD_PEPPER` трябва да са **различни** от тези на портала. Случаен низ: `node -e "console.log(crypto.randomBytes(32).toString('base64url'))"`. Без `PASSWORD_PEPPER` съществуващите пароли спират да работят, затова го пазете.
+Скриптът прави сертификата (`.secrets/buladmin-cloud.cer`), частния ключ (`MS_CERT_PRIVATE_KEY`), `SESSION_SECRET` и `PASSWORD_PEPPER` и отпечатва `MS_CERT_THUMBPRINT` за `wrangler.toml`. Съществуващи тайни не се презаписват. **Пазете `.dev.vars` на сигурно място:** без `PASSWORD_PEPPER` паролите спират да работят, а без ключа приложението не може да влезе в Microsoft. За вход с Google добавете `GOOGLE_CLIENT_SECRET` (от OAuth клиента на портала).
 
 ## 1. SharePoint сайт
 
-В SharePoint admin center създайте сайт **Cloud** с адрес `/sites/cloud` (Team site без Microsoft 365 група е достатъчен). В него оставете само хора, които може да виждат всички клиентски и финансови данни: таблиците се виждат от всеки член на сайта.
+```
+powershell -ExecutionPolicy Bypass -File worker\scripts\setup-site.ps1 -Owner ваш-имейл@bulmail.eu
+```
 
-Друг адрес: сменете `SP_SITE_PATH` в `worker/wrangler.toml`.
+Създава екипен сайт без Microsoft 365 група на адреса от `SP_SITE_PATH` и забранява външното споделяне. В сайта оставете само хора, които може да виждат всички клиентски и финансови данни.
 
-## 2. Microsoft приложение и таблици
+## 2. Microsoft приложение, домейн и таблици
 
 ```
 cd worker
@@ -32,14 +38,17 @@ node scripts/setup-microsoft.mjs --admin ваш-имейл@bulmail.eu --name "В
 
 Скриптът показва адрес и код. Влезте с акаунт на глобален администратор. След това той:
 
-1. проверява сертификата и добавя `https://cloud.buladmin.eu/api/auth/microsoft/callback` към адресите за вход, без да маха тези на портала;
-2. проверява `Sites.Selected` с admin consent;
-3. дава на приложението достъп до сайта `cloud` (временно `manage`);
-4. създава таблиците `Cloud - Контрагенти`, `Лица за контакт`, `Сделки`, `Задачи`, `Артикули`, `Търговски документи`, `Плащания`, `Потребители`, `История`, `Настройки`;
-5. добавя първия администратор и отпечатва еднократен линк за парола, валиден 72 часа;
-6. намалява правата върху сайта до `write`.
+1. създава (или намира) приложението „BULADMIN Cloud“ със сертификата и адреса `https://cloud.buladmin.eu/api/auth/microsoft/callback` и записва Application ID в `wrangler.toml`;
+2. одобрява `Sites.Selected` и входа (`openid email profile`) за цялата организация;
+3. проверява домейна `cloud.buladmin.eu` в tenant-а и отпечатва нужните DNS записи;
+4. дава на приложението достъп до сайта (временно `manage`);
+5. създава таблиците `Cloud - Контрагенти`, `Лица за контакт`, `Сделки`, `Задачи`, `Артикули`, `Търговски документи`, `Плащания`, `Потребители`, `История`, `Настройки`;
+6. добавя първия администратор и отпечатва еднократен линк за парола (72 часа; не е нужен при вход с Microsoft);
+7. намалява правата върху сайта до `write`.
 
-Скриптът може да се пуска повторно, например след добавяне на колони в `schema.json`. Изходът съдържа линка за парола, затова не го споделяйте.
+Скриптът може да се пуска повторно, например след добавяне на колони в `schema.json`. Приложението на портала не се променя.
+
+Проверка с истинските данни: `node scripts/check-microsoft.mjs --mail ваш-имейл@bulmail.eu` чете таблиците и праща пробен имейл.
 
 ## 3. Google
 
@@ -71,9 +80,15 @@ npm run stamp
 
 Скриптът добавя версия към адресите на скриптовете и стиловете, за да не смесва браузърът стари и нови файлове. След това качете в `main`. GitHub Pages публикува сам; в Settings → Pages домейнът е `cloud.buladmin.eu` (файлът `CNAME`) и „Enforce HTTPS“ е включено.
 
-## 6. Имейли (по желание)
+## 6. Имейли
 
-Докато `MAIL_ENABLED = "false"`, поканите и линковете за парола се показват на администратора, за да ги изпрати сам. За автоматични имейли създайте споделена кутия `no-reply@cloud.buladmin.eu` (или сменете `MAIL_FROM`), разрешете на приложението да праща от нея със `scripts/setup-mail.ps1` от портала (с новия адрес), сложете `MAIL_ENABLED = "true"` и изпълнете `npm run deploy`.
+Поканите, линковете за парола и „Забравена парола?“ идват от `no-reply@cloud.buladmin.eu` (`MAIL_ENABLED = "true"`). Настройката е с Exchange администратор:
+
+```
+powershell -ExecutionPolicy Bypass -File worker\scripts\setup-mail.ps1
+```
+
+Скриптът създава споделената кутия, разрешава на приложението да праща **само от нея** през Exchange RBAC и включва DKIM. Накрая `InScope` трябва да е `True` за no-reply и `False` за Вашата кутия. DNS записите на домейна (MX, SPF, двата DKIM CNAME) вече са в Cloudflare. По желание добавете и DMARC: `TXT _dmarc.cloud.buladmin.eu "v=DMARC1; p=quarantine; rua=mailto:dmarc@buladmin.eu"`.
 
 **Никога не добавяйте `Mail.Send` на приложението в Entra:** там правото важи за всички кутии в tenant-а.
 

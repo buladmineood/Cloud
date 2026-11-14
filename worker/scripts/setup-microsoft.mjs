@@ -1,26 +1,31 @@
-// Настройва Microsoft приложението за cloud.buladmin.eu наведнъж. Използва се същото приложение и сертификат
-// като при портала. Администратор влиза с код в браузъра, след което скриптът:
-//   1. качва сертификата от .secrets/buladmin-portal.cer, ако още не е качен, и добавя адреса за вход;
-//   2. добавя правото Sites.Selected с admin consent;
-//   3. дава на приложението достъп само до SharePoint сайта от SP_SITE_PATH;
-//   4. пуска provision.mjs (таблици и първи администратор);
-//   5. намалява правата върху сайта от manage на write.
-// Може да се пуска повторно: готовите стъпки се пропускат.
+// Настройва Microsoft 365 за cloud.buladmin.eu наведнъж. Администратор влиза с код в браузъра, след което скриптът:
+//   1. създава (или намира) отделно приложение „BULADMIN Cloud“ в Entra със сертификата от .secrets/buladmin-cloud.cer
+//      и адреса за вход; записва неговия Application ID в wrangler.toml (MS_CLIENT_ID);
+//   2. одобрява за цялата организация входа (openid, email, profile) и правото Sites.Selected;
+//   3. добавя домейна cloud.buladmin.eu в tenant-а и показва DNS записите, които трябват;
+//   4. дава на приложението достъп само до SharePoint сайта от SP_SITE_PATH (временно manage);
+//   5. пуска provision.mjs (таблици и първи администратор);
+//   6. намалява правата върху сайта до write.
+// Приложението на портала не се променя. Може да се пуска повторно: готовите стъпки се пропускат.
 //
 //   node scripts/setup-microsoft.mjs --admin ime@bulmail.eu --name "Име Фамилия"
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { CLIENT_ASSERTION_TYPE, clientAssertion } from '../src/crypto.js';
 
 // Публичното приложение на Microsoft за Graph от командния ред; достъпът е този на влезлия администратор.
 const GRAPH_CLI_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e';
 const GRAPH_APP_ID = '00000003-0000-0000-c000-000000000000';
-const SCOPES = 'Application.ReadWrite.All AppRoleAssignment.ReadWrite.All Sites.FullControl.All';
+const SCOPES = [
+  'Application.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All',
+  'Sites.FullControl.All', 'Domain.ReadWrite.All',
+].join(' ');
 const GRAPH = 'https://graph.microsoft.com/v1.0';
+const APP_NAME = 'BULADMIN Cloud';
+const MAIL_DOMAIN = 'cloud.buladmin.eu';
 
 const here = (path) => fileURLToPath(new URL(path, import.meta.url));
-const toml = readFileSync(here('../wrangler.toml'), 'utf8');
+let toml = readFileSync(here('../wrangler.toml'), 'utf8');
 const tomlVar = (key) => toml.match(new RegExp(`^${key} = "(.*)"$`, 'm'))[1];
 const arg = (flag) => {
   const i = process.argv.indexOf(flag);
@@ -29,8 +34,8 @@ const arg = (flag) => {
 const sleep = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
 
 const tenant = tomlVar('GRAPH_TENANT_ID');
-const appId = tomlVar('MS_CLIENT_ID');
-const certificate = readFileSync(here('../.secrets/buladmin-portal.cer'));
+const certificate = readFileSync(here('../.secrets/buladmin-cloud.cer'));
+const callback = `${tomlVar('APP_ORIGIN')}/api/auth/microsoft/callback`;
 
 async function signIn() {
   const base = `https://login.microsoftonline.com/${tenant}/oauth2/v2.0`;
@@ -66,7 +71,7 @@ const token = await signIn();
 console.log('Входът е успешен.');
 
 async function graph(path, method = 'GET', body) {
-  const res = await fetch(`${GRAPH}${path}`, {
+  const res = await fetch(path.startsWith('http') ? path : `${GRAPH}${path}`, {
     method,
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: body && JSON.stringify(body),
@@ -75,107 +80,133 @@ async function graph(path, method = 'GET', body) {
     const detail = await res.json().catch(() => ({}));
     const error = new Error(`${method} ${path}: ${res.status} ${detail.error?.code || ''} ${detail.error?.message || ''}`);
     error.status = res.status;
+    error.code = detail.error?.code;
     throw error;
   }
   return res.status === 204 ? null : res.json();
 }
 
-// 1. Сертификат
-const app = await graph(`/applications(appId='${appId}')?$select=id,displayName,signInAudience,web,keyCredentials,requiredResourceAccess`);
-console.log(`Приложение: ${app.displayName}; signInAudience=${app.signInAudience}`);
-// Приложението обслужва и портала: адресът за вход на cloud се добавя към съществуващите, без да ги маха.
-const callback = `${tomlVar('APP_ORIGIN')}/api/auth/microsoft/callback`;
-if (app.web?.redirectUris?.includes(callback)) {
-  console.log(`1. Адресът за вход ${callback} вече е добавен.`);
+// 1. Отделно приложение за cloud
+const graphSp = await graph(`/servicePrincipals(appId='${GRAPH_APP_ID}')?$select=id,appRoles,oauth2PermissionScopes`);
+const sitesSelected = graphSp.appRoles.find((r) => r.value === 'Sites.Selected');
+const delegated = ['openid', 'email', 'profile'].map((value) => graphSp.oauth2PermissionScopes.find((s) => s.value === value));
+const requiredResourceAccess = [{
+  resourceAppId: GRAPH_APP_ID,
+  resourceAccess: [{ id: sitesSelected.id, type: 'Role' }, ...delegated.map((s) => ({ id: s.id, type: 'Scope' }))],
+}];
+
+let [app] = (await graph(`/applications?$filter=displayName eq '${APP_NAME}'&$select=id,appId,web,keyCredentials`)).value;
+if (app) {
+  console.log(`1. Приложението „${APP_NAME}“ съществува: ${app.appId}`);
+  if (!app.web?.redirectUris?.includes(callback)) {
+    await graph(`/applications/${app.id}`, 'PATCH', { web: { redirectUris: [...(app.web?.redirectUris || []), callback] } });
+    console.log(`   добавен адрес за вход ${callback}`);
+  }
+  if (!app.keyCredentials?.length) {
+    await graph(`/applications/${app.id}`, 'PATCH', {
+      keyCredentials: [{ type: 'AsymmetricX509Cert', usage: 'Verify', displayName: APP_NAME, key: certificate.toString('base64') }],
+    });
+    console.log('   качен сертификат');
+  }
 } else {
-  await graph(`/applications/${app.id}`, 'PATCH', { web: { redirectUris: [...(app.web?.redirectUris || []), callback] } });
-  console.log(`1. Добавен адрес за вход ${callback}.`);
+  // Вход само със служебни акаунти (Microsoft Entra), без лични Microsoft акаунти.
+  app = await graph('/applications', 'POST', {
+    displayName: APP_NAME,
+    signInAudience: 'AzureADMultipleOrgs',
+    web: { redirectUris: [callback], implicitGrantSettings: { enableIdTokenIssuance: false } },
+    keyCredentials: [{ type: 'AsymmetricX509Cert', usage: 'Verify', displayName: APP_NAME, key: certificate.toString('base64') }],
+    requiredResourceAccess,
+    info: { marketingUrl: 'https://cloud.buladmin.eu/' },
+  });
+  console.log(`1. Създадено приложение „${APP_NAME}“: ${app.appId}`);
+}
+const appId = app.appId;
+if (tomlVar('MS_CLIENT_ID') !== appId) {
+  toml = toml.replace(/^MS_CLIENT_ID = ".*"$/m, `MS_CLIENT_ID = "${appId}"`);
+  writeFileSync(here('../wrangler.toml'), toml);
+  console.log(`   MS_CLIENT_ID в wrangler.toml е обновен на ${appId}`);
 }
 
-// Ако Microsoft приема подписа, сертификатът вече е качен и няма какво да се променя.
-async function certificateAccepted() {
-  const privateKey = readFileSync(here('../.dev.vars'), 'utf8').match(/^MS_CERT_PRIVATE_KEY=(.*)$/m)?.[1]?.trim();
-  if (!privateKey) throw new Error('Липсва MS_CERT_PRIVATE_KEY в .dev.vars');
-  const tokenUrl = `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`;
-  const res = await fetch(tokenUrl, {
-    method: 'POST',
-    body: new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: appId,
-      client_assertion_type: CLIENT_ASSERTION_TYPE,
-      client_assertion: await clientAssertion({
-        MS_CLIENT_ID: appId,
-        MS_CERT_THUMBPRINT: tomlVar('MS_CERT_THUMBPRINT'),
-        MS_CERT_PRIVATE_KEY: privateKey,
-      }, tokenUrl),
-      scope: 'https://graph.microsoft.com/.default',
-    }),
-  });
-  return res.ok;
-}
-
-if (await certificateAccepted()) {
-  console.log('1. Сертификатът вече е качен.');
-} else {
-  await graph(`/applications/${app.id}`, 'PATCH', {
-    keyCredentials: [
-      ...app.keyCredentials.map((k) => ({
-        keyId: k.keyId, type: k.type, usage: k.usage, displayName: k.displayName, key: null,
-      })),
-      { type: 'AsymmetricX509Cert', usage: 'Verify', displayName: 'BULADMIN Portal', key: certificate.toString('base64') },
-    ],
-  });
-  console.log('1. Сертификатът е качен.');
-}
-
-// 2. Права на приложението и admin consent.
-// Mail.Send нарочно НЕ се добавя тук: в Entra то важи за всички пощенски кутии в tenant-а и правата
-// се събират, така че ограничението в Exchange не би имало ефект. Изпращането се разрешава само за
-// двете кутии на портала през Exchange RBAC със scripts/setup-mail.ps1.
-const graphSp = await graph(`/servicePrincipals(appId='${GRAPH_APP_ID}')?$select=id,appRoles`);
-const roles = ['Sites.Selected'].map((value) => graphSp.appRoles.find((r) => r.value === value));
-const graphAccess = app.requiredResourceAccess.find((r) => r.resourceAppId === GRAPH_APP_ID);
-const missingAccess = roles.filter((role) => !graphAccess?.resourceAccess.some((r) => r.id === role.id));
-if (missingAccess.length) {
-  await graph(`/applications/${app.id}`, 'PATCH', {
-    requiredResourceAccess: [
-      ...app.requiredResourceAccess.filter((r) => r.resourceAppId !== GRAPH_APP_ID),
-      {
-        resourceAppId: GRAPH_APP_ID,
-        resourceAccess: [
-          ...(graphAccess?.resourceAccess || []),
-          ...missingAccess.map((role) => ({ id: role.id, type: 'Role' })),
-        ],
-      },
-    ],
-  });
-}
 let appSp;
-try {
-  appSp = await graph(`/servicePrincipals(appId='${appId}')?$select=id`);
-} catch (err) {
-  if (err.status !== 404) throw err;
-  appSp = await graph('/servicePrincipals', 'POST', { appId });
+for (let attempt = 0; !appSp; attempt++) {
+  try {
+    appSp = await graph(`/servicePrincipals(appId='${appId}')?$select=id`);
+  } catch (err) {
+    if (err.status !== 404) throw err;
+    try {
+      appSp = await graph('/servicePrincipals', 'POST', { appId });
+    } catch (createErr) {
+      if (attempt > 5) throw createErr;
+      await sleep(5);
+    }
+  }
 }
 // setup-mail.ps1 чете този идентификатор: Exchange изисква ID-то от Enterprise applications.
 writeFileSync(here('../.secrets/service-principal-id.txt'), appSp.id);
+
+// 2. Одобрение за организацията. Mail.Send нарочно НЕ се дава тук: в Entra то важи за всички кутии в tenant-а.
+// Изпращането се разрешава само за no-reply@cloud.buladmin.eu през Exchange RBAC със scripts/setup-mail.ps1.
 const assignments = (await graph(`/servicePrincipals/${appSp.id}/appRoleAssignments`)).value;
-for (const role of roles) {
-  if (assignments.some((a) => a.appRoleId === role.id && a.resourceId === graphSp.id)) {
-    console.log(`2. ${role.value} вече е одобрено.`);
-  } else {
-    await graph(`/servicePrincipals/${graphSp.id}/appRoleAssignedTo`, 'POST', {
-      principalId: appSp.id, resourceId: graphSp.id, appRoleId: role.id,
-    });
-    console.log(`2. ${role.value} е добавено и одобрено.`);
-  }
+if (assignments.some((a) => a.appRoleId === sitesSelected.id && a.resourceId === graphSp.id)) {
+  console.log('2. Sites.Selected вече е одобрено.');
+} else {
+  await graph(`/servicePrincipals/${graphSp.id}/appRoleAssignedTo`, 'POST', { principalId: appSp.id, resourceId: graphSp.id, appRoleId: sitesSelected.id });
+  console.log('2. Sites.Selected е одобрено.');
+}
+const grants = (await graph(`/oauth2PermissionGrants?$filter=clientId eq '${appSp.id}'`)).value;
+const grant = grants.find((g) => g.resourceId === graphSp.id && g.consentType === 'AllPrincipals');
+if (!grant) {
+  await graph('/oauth2PermissionGrants', 'POST', { clientId: appSp.id, consentType: 'AllPrincipals', resourceId: graphSp.id, scope: 'openid email profile' });
+  console.log('   входът е одобрен за цялата организация (без екран за съгласие).');
+} else {
+  console.log('   входът вече е одобрен за организацията.');
 }
 
-// 3. Достъп само до сайта на портала
+// 3. Домейн за имейлите
+let domain;
+try {
+  domain = await graph(`/domains/${MAIL_DOMAIN}`);
+} catch (err) {
+  if (err.status !== 404) throw err;
+  domain = await graph('/domains', 'POST', { id: MAIL_DOMAIN });
+  console.log(`3. Домейнът ${MAIL_DOMAIN} е добавен в tenant-а.`);
+}
+if (!domain.isVerified) {
+  try {
+    domain = await graph(`/domains/${MAIL_DOMAIN}/verify`, 'POST');
+  } catch { /* записът за проверка още не е в DNS */ }
+}
+const dnsRow = (r) => {
+  if (r.recordType === 'Txt') return `TXT   ${r.label}   "${r.text}"`;
+  if (r.recordType === 'Mx') return `MX    ${r.label}   ${r.mailExchange}   (приоритет ${r.preference})`;
+  if (r.recordType === 'CName') return `CNAME ${r.label}   ${r.canonicalName}`;
+  return `${r.recordType} ${r.label}`;
+};
+if (domain.isVerified) {
+  console.log(`3. Домейнът ${MAIL_DOMAIN} е потвърден.`);
+  if (!domain.supportedServices?.includes('Email')) {
+    try {
+      await graph(`/domains/${MAIL_DOMAIN}`, 'PATCH', { supportedServices: ['Email'] });
+      console.log('   включена е услугата Email.');
+    } catch (err) {
+      console.log(`   ВНИМАНИЕ: не успях да включа Email за домейна: ${err.message}`);
+    }
+  }
+  const records = (await graph(`/domains/${MAIL_DOMAIN}/serviceConfigurationRecords`)).value
+    .filter((r) => r.supportedService === 'Email');
+  console.log('DNS-MAIL Записи за поща в DNS (Cloudflare, DNS only):');
+  for (const r of records) console.log(`DNS-MAIL ${dnsRow(r)}`);
+} else {
+  const records = (await graph(`/domains/${MAIL_DOMAIN}/verificationDnsRecords`)).value.filter((r) => r.recordType === 'Txt');
+  console.log(`3. Домейнът ${MAIL_DOMAIN} чака потвърждение. Добавете в DNS (Cloudflare, DNS only) и пуснете скрипта отново:`);
+  for (const r of records) console.log(`DNS-VERIFY ${dnsRow(r)}`);
+}
+
+// 4. Достъп само до сайта на cloud
 const site = await graph(`/sites/${tomlVar('SP_HOSTNAME')}:${tomlVar('SP_SITE_PATH')}?$select=id,webUrl`);
 const findGrant = async () => (await graph(`/sites/${site.id}/permissions`)).value
   .find((p) => (p.grantedToIdentitiesV2 || p.grantedToIdentities || []).some((g) => g.application?.id === appId));
-const setRole = (grant, roles) => graph(`/sites/${site.id}/permissions/${grant.id}`, 'PATCH', { roles });
+const setRole = (siteGrant, roles) => graph(`/sites/${site.id}/permissions/${siteGrant.id}`, 'PATCH', { roles });
 
 const existing = await findGrant();
 if (existing) {
@@ -183,24 +214,24 @@ if (existing) {
 } else {
   await graph(`/sites/${site.id}/permissions`, 'POST', {
     roles: ['manage'],
-    grantedToIdentities: [{ application: { id: appId, displayName: app.displayName } }],
+    grantedToIdentities: [{ application: { id: appId, displayName: APP_NAME } }],
   });
 }
-console.log(`3. Приложението има временно право manage върху ${site.webUrl}.`);
+console.log(`4. Приложението има временно право manage върху ${site.webUrl}.`);
 
-// 4. Таблици. Новите права и сертификатът се разпространяват до няколко минути, затова има повторни опити.
+// 5. Таблици. Новото приложение и сертификатът се разпространяват до няколко минути, затова има повторни опити.
 const admin = arg('--admin');
 const provisionArgs = [here('./provision.mjs'), ...(admin ? ['--admin', admin, '--name', arg('--name') || admin] : [])];
 let provisioned = false;
-for (let attempt = 1; attempt <= 10 && !provisioned; attempt++) {
-  console.log(`4. Създаване на таблиците, опит ${attempt}...`);
-  const result = spawnSync(process.execPath, provisionArgs, { stdio: 'inherit' });
+for (let attempt = 1; attempt <= 12 && !provisioned; attempt++) {
+  console.log(`5. Създаване на таблиците, опит ${attempt}...`);
+  const result = spawnSync(process.execPath, provisionArgs, { stdio: 'inherit', env: process.env });
   provisioned = result.status === 0;
-  if (!provisioned && attempt < 10) await sleep(30);
+  if (!provisioned && attempt < 12) await sleep(30);
 }
 if (!provisioned) throw new Error('Таблиците не бяха създадени. Вижте грешката по-горе; правото остава manage.');
 
-// 5. За ежедневната работа стига write.
+// 6. За ежедневната работа стига write.
 await setRole(await findGrant(), ['write']);
-console.log('5. Правата върху сайта са намалени до write.');
+console.log('6. Правата върху сайта са намалени до write.');
 console.log('ГОТОВО');

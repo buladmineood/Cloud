@@ -1,6 +1,6 @@
 # BulAdmin CRM / BulAdmin ERP
 
-Вътрешна система на БУЛАДМИН на https://cloud.buladmin.eu/: клиенти, сделки и задачи (CRM), артикули, оферти, фактури и плащания (ERP). Изградена е като [портала](https://github.com/buladmineood/portal) и използва същото Microsoft приложение.
+Вътрешна система на БУЛАДМИН на https://cloud.buladmin.eu/: клиенти, сделки и задачи (CRM), артикули, оферти, фактури и плащания (ERP). Изградена е като [портала](https://github.com/buladmineood/portal), с отделно Microsoft приложение „BULADMIN Cloud“.
 
 | Част | Къде | Технология |
 |---|---|---|

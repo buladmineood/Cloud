@@ -1,0 +1,135 @@
+/* BulAdmin CRM / ERP: елементи, които порталът няма. Зарежда се след cloud.css. */
+.app__nav-group { margin: 14px 12px 4px; font-size: .7rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: rgb(255 255 255 / .5); }
+.app__nav-list > .app__nav-group:first-child { margin-top: 0; }
+a.app__user-text { color: #fff; text-decoration: none; border-radius: 6px; }
+a.app__user-text:hover strong { text-decoration: underline; }
+.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+th { white-space: nowrap; }
+.td-actions { width: 1%; white-space: nowrap; }
+.nowrap { white-space: nowrap; }
+.td-actions .row-tight { flex-wrap: nowrap; }
+td a[href^="mailto:"], td a[href^="tel:"], td a[href^="http"] { font-weight: 400; }
+tr.is-muted td { opacity: .6; }
+.big-num { font-size: 1.4rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.dialog--wide { width: min(760px, calc(100vw - 32px)); }
+.kpi__value { font-size: clamp(1.15rem, .85rem + .9vw, 1.6rem); white-space: nowrap; }
+.field input[type="search"], .field input[type="url"] {
+  width: 100%; min-height: 44px; padding: 9px 12px;
+  border: 1px solid var(--field-line); border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit;
+}
+@media (max-width: 860px) { .app__nav-group { display: none; } }
+
+/* Превключвател на изгледа */
+.segmented--inline { display: inline-grid; grid-template-columns: auto auto; }
+.segmented--inline button { display: inline-flex; align-items: center; gap: 6px; padding-inline: 12px; }
+
+/* Етикети */
+.pill[data-stage="Нова"], .pill[data-doc="Чернова"] { background: var(--tint); color: var(--ink); border-color: var(--line); }
+.pill[data-stage="Квалифицирана"], .pill[data-stage="Оферта"], .pill[data-stage="Преговори"], .pill[data-doc="Издаден"] { background: var(--info-bg); color: var(--info-ink); border-color: var(--info-line); }
+.pill[data-stage="Спечелена"], .pill[data-doc="Приета"], .pill[data-pay="Платен"], .pill[data-activitystatus="Изпълнена"] { background: var(--ok-bg); color: var(--ok); border-color: var(--ok-line); }
+.pill[data-stage="Загубена"], .pill[data-doc="Отказана"], .pill[data-doc="Анулиран"], .pill[data-pay="Неплатен"] { background: var(--err-bg); color: var(--error); border-color: var(--err-line); }
+.pill[data-pay="Частично платен"], .pill[data-activitystatus="Предстои"] { background: var(--warn-bg); color: var(--warn-ink); border-color: var(--gold-soft); }
+.pill[data-activitystatus="Отменена"] { background: var(--tint); color: var(--ink-2); }
+.pill[data-relation="Клиент"] { background: var(--navy); color: var(--on-primary); }
+.pill[data-relation="Потенциален клиент"] { background: var(--warn-bg); color: var(--warn-ink); border-color: var(--gold-soft); }
+.pill[data-relation="Доставчик"], .pill[data-relation="Партньор"] { background: var(--tint); color: var(--ink); border-color: var(--line); }
+
+/* Сделки по етапи */
+.deal-card__foot strong { white-space: nowrap; }
+.board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(210px, 1fr); gap: 12px; overflow-x: auto; padding-bottom: 8px; align-items: start; }
+.board__col { display: grid; gap: 8px; padding: 10px; border-radius: var(--radius); background: var(--tint); border-top: 4px solid var(--info-line); }
+.board__col[data-stage="Нова"] { border-top-color: var(--field-line); }
+.board__col[data-stage="Спечелена"] { border-top-color: var(--ok); }
+.board__col[data-stage="Загубена"] { border-top-color: var(--error); }
+.board__head { display: grid; gap: 2px; padding: 2px 4px 4px; }
+.board__cards { display: grid; gap: 8px; }
+.deal-card { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); box-shadow: 0 1px 2px rgb(16 41 76 / .06); }
+.deal-card__title { font-weight: 650; text-decoration: none; }
+.deal-card__title:hover { text-decoration: underline; }
+.deal-card__foot { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-variant-numeric: tabular-nums; }
+.deal-card__move { width: 100%; min-height: 32px; margin-top: 4px; padding: 4px 8px; border: 1px solid var(--field-line); border-radius: 6px; background: var(--paper); color: var(--ink); font: inherit; font-size: .82rem; }
+@media (max-width: 860px) { .board { grid-auto-flow: row; grid-auto-columns: auto; } }
+
+.stage-bar { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 4px; }
+.stage-bar__step { min-height: 40px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); color: var(--ink-2); font: inherit; font-size: .85rem; font-weight: 600; cursor: pointer; }
+.stage-bar__step:hover { border-color: var(--navy); }
+.stage-bar__step[aria-pressed="true"] { background: var(--navy); border-color: var(--navy); color: var(--on-primary); }
+.stage-bar__step[aria-pressed="true"][data-stage="Спечелена"] { background: var(--ok); border-color: var(--ok); color: #fff; }
+.stage-bar__step[aria-pressed="true"][data-stage="Загубена"] { background: var(--danger); border-color: var(--danger); color: #fff; }
+@media (max-width: 700px) { .stage-bar { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Задачи */
+.task-list { display: grid; gap: 8px; }
+.task { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); }
+.task--overdue { border-color: var(--err-line); box-shadow: inset 3px 0 0 var(--error); }
+.task--done .task__title { text-decoration: line-through; color: var(--ink-2); }
+.task__check { display: grid; place-items: center; width: 26px; height: 26px; flex: none; padding: 0; border: 2px solid var(--field-line); border-radius: 50%; background: var(--paper); color: var(--ok); cursor: pointer; }
+.task__check:hover { border-color: var(--ok); background: var(--ok-bg); }
+.task__check--static { cursor: default; border-color: var(--ok-line); background: var(--ok-bg); }
+.task__body { flex: 1; min-width: 0; display: grid; }
+.task__title { font-weight: 600; text-decoration: none; }
+.task__title:hover { text-decoration: underline; }
+
+/* Редове на документ */
+.lines input, .lines select {
+  width: 100%; min-height: 38px; padding: 6px 8px; border: 1px solid var(--field-line); border-radius: 6px; background: var(--paper); color: var(--ink); font: inherit; font-size: .92rem;
+}
+.lines td { vertical-align: middle; padding: 8px 6px; }
+.lines td:first-child { min-width: 240px; }
+.lines .line-name { margin-top: 6px; }
+.lines .line-num { width: 88px; text-align: right; }
+.lines .line-unit { width: 64px; }
+.lines .line-vat { width: 84px; }
+@media (max-width: 800px) {
+  .lines td:first-child { min-width: 0; }
+  .lines .line-num, .lines .line-unit { width: 100%; text-align: left; }
+  .lines td { padding: 4px 0; }
+}
+.totals { display: grid; grid-template-columns: 1fr auto; gap: 4px 24px; margin-left: auto; width: min(100%, 360px); font-variant-numeric: tabular-nums; }
+.totals dt { color: var(--ink-2); }
+.totals dd { text-align: right; }
+.totals .totals__grand { padding-top: 8px; border-top: 2px solid var(--ink); font-weight: 700; font-size: 1.1rem; color: var(--ink); }
+.pay-list { display: grid; gap: 6px; }
+.pay-list li { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 8px 10px; border-radius: 7px; background: var(--bg); font-size: .9rem; }
+.pay-list li > span { flex: 1; min-width: 0; }
+
+/* Документ за печат */
+.doc-sheet { padding: clamp(18px, 3vw, 36px); }
+.doc-print { display: grid; gap: 22px; font-size: .92rem; }
+.doc-print__head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; padding-bottom: 14px; border-bottom: 3px solid var(--gold); }
+.doc-print__type { font-size: 1.6rem; letter-spacing: .06em; }
+.doc-print__number { font-size: 1.15rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.doc-print__dates { display: grid; grid-template-columns: auto auto; gap: 2px 14px; align-content: start; }
+.doc-print__dates dt { color: var(--ink-2); }
+.doc-print__parties { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.doc-print__parties section { padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; }
+.doc-print__parties h3 { margin-bottom: 6px; font-size: .78rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-2); }
+.doc-print__party { font-weight: 650; font-size: 1rem; }
+.doc-print__lines th { background: var(--tint); }
+.doc-print__lines td, .doc-print__lines th { padding: 7px 8px; }
+.doc-print__foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 20px; }
+.doc-print__pay { flex: 1 1 260px; display: grid; gap: 6px; align-content: start; }
+.doc-sheet { overflow-x: auto; }
+/* Таблицата на документа остава таблица и на телефон: редовете са по-четими така, а листът се плъзга настрани. */
+.doc-print__lines thead { position: static; width: auto; height: auto; overflow: visible; clip-path: none; }
+.doc-print__lines { display: table; min-width: 560px; }
+.doc-print__lines tbody { display: table-row-group; }
+.doc-print__lines tr { display: table-row; padding: 0; }
+.doc-print__lines td { display: table-cell; padding: 6px 8px; border-top: 1px solid var(--line); }
+@media (max-width: 800px) { .doc-print__parties { grid-template-columns: minmax(0, 1fr); } }
+
+@media print {
+  :root, :root[data-theme="dark"] {
+    color-scheme: light; --paper: #fff; --bg: #fff; --ink: #000; --ink-2: #333; --line: #999; --tint: #eee; --gold: #b5862a;
+  }
+  body { background: #fff; color: #000; }
+  .app { display: block; padding: 0; }
+  .app__side, .app__top, .no-print, .toasts, .cookie-notice { display: none !important; }
+  .page { width: 100%; padding: 0; }
+  .split { display: block; }
+  .card.doc-sheet { border: 0; box-shadow: none; padding: 0; overflow: visible; }
+  .doc-print { font-size: 10.5pt; }
+  .doc-print__lines { min-width: 0; width: 100%; }
+  .doc-print__parties { grid-template-columns: 1fr 1fr; }
+  @page { margin: 14mm; }
+}

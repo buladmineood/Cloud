@@ -1,0 +1,213 @@
+{
+  "companies": {
+    "title": "Cloud - Контрагенти",
+    "titleLabel": "ID контрагент",
+    "prefix": "CO",
+    "generic": true,
+    "label": "Контрагенти",
+    "single": "Контрагент",
+    "display": "name",
+    "columns": [
+      { "name": "name", "label": "Наименование", "kind": "text", "required": true, "list": true },
+      { "name": "relation", "label": "Вид", "kind": "choice", "choices": ["Клиент", "Потенциален клиент", "Доставчик", "Партньор"], "indexed": true, "list": true, "default": "Клиент" },
+      { "name": "eik", "label": "ЕИК/БУЛСТАТ", "kind": "text", "input": "eik", "indexed": true, "list": true },
+      { "name": "vatNumber", "label": "ДДС номер", "kind": "text" },
+      { "name": "mol", "label": "МОЛ / представляващ", "kind": "text" },
+      { "name": "city", "label": "Населено място", "kind": "text", "list": true },
+      { "name": "address", "label": "Адрес", "kind": "text", "wide": true },
+      { "name": "phone", "label": "Телефон", "kind": "text", "input": "tel", "list": true },
+      { "name": "email", "label": "Имейл", "kind": "text", "input": "email" },
+      { "name": "website", "label": "Уебсайт", "kind": "text", "input": "url" },
+      { "name": "iban", "label": "IBAN", "kind": "text" },
+      { "name": "owner", "label": "Отговорник", "kind": "text", "input": "user", "indexed": true, "list": true },
+      { "name": "notes", "label": "Бележки", "kind": "multiline", "wide": true },
+      { "name": "createdAt", "label": "Създаден", "kind": "date", "system": true },
+      { "name": "updatedAt", "label": "Обновен", "kind": "date", "system": true }
+    ]
+  },
+  "contacts": {
+    "title": "Cloud - Лица за контакт",
+    "titleLabel": "ID лице",
+    "prefix": "CT",
+    "generic": true,
+    "label": "Лица за контакт",
+    "single": "Лице за контакт",
+    "display": ["firstName", "lastName"],
+    "columns": [
+      { "name": "firstName", "label": "Име", "kind": "text", "required": true, "list": true },
+      { "name": "lastName", "label": "Фамилия", "kind": "text" },
+      { "name": "companyId", "label": "Контрагент", "kind": "text", "input": "ref", "ref": "companies", "indexed": true, "list": true },
+      { "name": "position", "label": "Длъжност", "kind": "text", "list": true },
+      { "name": "phone", "label": "Телефон", "kind": "text", "input": "tel", "list": true },
+      { "name": "email", "label": "Имейл", "kind": "text", "input": "email", "list": true },
+      { "name": "notes", "label": "Бележки", "kind": "multiline", "wide": true },
+      { "name": "createdAt", "label": "Създадено", "kind": "date", "system": true },
+      { "name": "updatedAt", "label": "Обновено", "kind": "date", "system": true }
+    ]
+  },
+  "deals": {
+    "title": "Cloud - Сделки",
+    "titleLabel": "ID сделка",
+    "prefix": "DL",
+    "generic": true,
+    "label": "Сделки",
+    "single": "Сделка",
+    "display": "title",
+    "columns": [
+      { "name": "title", "label": "Сделка", "kind": "text", "required": true, "list": true },
+      { "name": "companyId", "label": "Контрагент", "kind": "text", "input": "ref", "ref": "companies", "required": true, "indexed": true, "list": true },
+      { "name": "contactId", "label": "Лице за контакт", "kind": "text", "input": "ref", "ref": "contacts", "indexed": true },
+      { "name": "stage", "label": "Етап", "kind": "choice", "choices": ["Нова", "Квалифицирана", "Оферта", "Преговори", "Спечелена", "Загубена"], "indexed": true, "list": true, "default": "Нова" },
+      { "name": "amount", "label": "Стойност без ДДС", "kind": "number", "input": "money", "list": true },
+      { "name": "expectedClose", "label": "Очаквано приключване", "kind": "day", "list": true },
+      { "name": "owner", "label": "Отговорник", "kind": "text", "input": "user", "indexed": true, "list": true },
+      { "name": "lostReason", "label": "Причина при загуба", "kind": "text", "wide": true },
+      { "name": "notes", "label": "Бележки", "kind": "multiline", "wide": true },
+      { "name": "closedAt", "label": "Приключена на", "kind": "date", "system": true },
+      { "name": "createdAt", "label": "Създадена", "kind": "date", "system": true },
+      { "name": "updatedAt", "label": "Обновена", "kind": "date", "system": true }
+    ]
+  },
+  "activities": {
+    "title": "Cloud - Задачи",
+    "titleLabel": "ID задача",
+    "prefix": "AC",
+    "generic": true,
+    "label": "Задачи",
+    "single": "Задача",
+    "display": "subject",
+    "columns": [
+      { "name": "subject", "label": "Задача", "kind": "text", "required": true, "list": true, "wide": true },
+      { "name": "activityType", "label": "Вид", "kind": "choice", "choices": ["Задача", "Обаждане", "Среща", "Имейл", "Бележка"], "list": true, "default": "Задача" },
+      { "name": "dueDate", "label": "Срок", "kind": "day", "list": true },
+      { "name": "activityStatus", "label": "Статус", "kind": "choice", "choices": ["Предстои", "Изпълнена", "Отменена"], "indexed": true, "list": true, "default": "Предстои" },
+      { "name": "assignedTo", "label": "Изпълнител", "kind": "text", "input": "user", "indexed": true, "list": true },
+      { "name": "companyId", "label": "Контрагент", "kind": "text", "input": "ref", "ref": "companies", "indexed": true, "list": true },
+      { "name": "dealId", "label": "Сделка", "kind": "text", "input": "ref", "ref": "deals", "indexed": true },
+      { "name": "notes", "label": "Бележки", "kind": "multiline", "wide": true },
+      { "name": "doneAt", "label": "Изпълнена на", "kind": "date", "system": true },
+      { "name": "createdBy", "label": "Създал", "kind": "text", "input": "user", "system": true },
+      { "name": "createdAt", "label": "Създадена", "kind": "date", "system": true },
+      { "name": "updatedAt", "label": "Обновена", "kind": "date", "system": true }
+    ]
+  },
+  "products": {
+    "title": "Cloud - Артикули",
+    "titleLabel": "ID артикул",
+    "prefix": "PR",
+    "generic": true,
+    "label": "Артикули и услуги",
+    "single": "Артикул",
+    "display": "name",
+    "columns": [
+      { "name": "code", "label": "Код", "kind": "text", "indexed": true, "list": true },
+      { "name": "name", "label": "Наименование", "kind": "text", "required": true, "list": true },
+      { "name": "itemType", "label": "Вид", "kind": "choice", "choices": ["Услуга", "Стока"], "list": true, "default": "Услуга" },
+      { "name": "unit", "label": "Мярка", "kind": "text", "list": true, "default": "бр." },
+      { "name": "price", "label": "Цена без ДДС", "kind": "number", "input": "money", "list": true },
+      { "name": "vatRate", "label": "ДДС %", "kind": "choice", "choices": ["20", "9", "0"], "list": true, "default": "20" },
+      { "name": "stock", "label": "Наличност", "kind": "number", "list": true },
+      { "name": "isActive", "label": "Активен", "kind": "choice", "choices": ["Да", "Не"], "list": true, "default": "Да" },
+      { "name": "description", "label": "Описание", "kind": "multiline", "wide": true },
+      { "name": "createdAt", "label": "Създаден", "kind": "date", "system": true },
+      { "name": "updatedAt", "label": "Обновен", "kind": "date", "system": true }
+    ]
+  },
+  "documents": {
+    "title": "Cloud - Търговски документи",
+    "titleLabel": "ID документ",
+    "prefix": "DOC",
+    "label": "Оферти и фактури",
+    "single": "Документ",
+    "display": "number",
+    "columns": [
+      { "name": "docType", "label": "Вид", "kind": "choice", "choices": ["Оферта", "Проформа фактура", "Фактура", "Кредитно известие"], "indexed": true },
+      { "name": "number", "label": "Номер", "kind": "text", "indexed": true },
+      { "name": "docStatus", "label": "Статус", "kind": "choice", "choices": ["Чернова", "Издаден", "Приета", "Отказана", "Анулиран"], "indexed": true },
+      { "name": "issueDate", "label": "Дата на издаване", "kind": "day" },
+      { "name": "taxEventDate", "label": "Дата на данъчно събитие", "kind": "day" },
+      { "name": "dueDate", "label": "Падеж / валидност", "kind": "day" },
+      { "name": "companyId", "label": "Контрагент", "kind": "text", "indexed": true },
+      { "name": "companyName", "label": "Получател", "kind": "text" },
+      { "name": "dealId", "label": "Сделка", "kind": "text", "indexed": true },
+      { "name": "relatedId", "label": "Свързан документ", "kind": "text", "indexed": true },
+      { "name": "buyer", "label": "Данни на получателя", "kind": "multiline" },
+      { "name": "seller", "label": "Данни на доставчика", "kind": "multiline" },
+      { "name": "lines", "label": "Редове", "kind": "multiline" },
+      { "name": "currency", "label": "Валута", "kind": "text" },
+      { "name": "subtotal", "label": "Сума без ДДС", "kind": "number" },
+      { "name": "vatAmount", "label": "ДДС", "kind": "number" },
+      { "name": "total", "label": "Сума за плащане", "kind": "number" },
+      { "name": "paidAmount", "label": "Платено", "kind": "number" },
+      { "name": "paymentStatus", "label": "Плащане", "kind": "choice", "choices": ["Неплатен", "Частично платен", "Платен"], "indexed": true },
+      { "name": "paymentMethod", "label": "Начин на плащане", "kind": "choice", "choices": ["Банков превод", "В брой", "С карта", "Наложен платеж"] },
+      { "name": "vatExemptReason", "label": "Основание за неначисляване на ДДС", "kind": "text" },
+      { "name": "notes", "label": "Забележки", "kind": "multiline" },
+      { "name": "createdBy", "label": "Създал", "kind": "text" },
+      { "name": "issuedBy", "label": "Съставил", "kind": "text" },
+      { "name": "issuedAt", "label": "Издаден на", "kind": "date" },
+      { "name": "createdAt", "label": "Създаден", "kind": "date" },
+      { "name": "updatedAt", "label": "Обновен", "kind": "date" }
+    ]
+  },
+  "payments": {
+    "title": "Cloud - Плащания",
+    "titleLabel": "ID плащане",
+    "prefix": "PAY",
+    "label": "Плащания",
+    "single": "Плащане",
+    "columns": [
+      { "name": "documentId", "label": "Документ", "kind": "text", "indexed": true },
+      { "name": "companyId", "label": "Контрагент", "kind": "text", "indexed": true },
+      { "name": "paidAt", "label": "Дата", "kind": "day" },
+      { "name": "amount", "label": "Сума", "kind": "number" },
+      { "name": "method", "label": "Начин", "kind": "choice", "choices": ["Банков превод", "В брой", "С карта", "Наложен платеж"] },
+      { "name": "reference", "label": "Основание / референция", "kind": "text" },
+      { "name": "createdBy", "label": "Въвел", "kind": "text" },
+      { "name": "createdAt", "label": "Въведено на", "kind": "date" }
+    ]
+  },
+  "users": {
+    "title": "Cloud - Потребители",
+    "titleLabel": "Имейл за вход",
+    "columns": [
+      { "name": "fullName", "label": "Име", "kind": "text" },
+      { "name": "role", "label": "Роля", "kind": "choice", "choices": ["Администратор", "Потребител", "Наблюдател"] },
+      { "name": "isActive", "label": "Активен", "kind": "choice", "choices": ["Да", "Не"] },
+      { "name": "jobTitle", "label": "Длъжност", "kind": "text" },
+      { "name": "passwordHash", "label": "Хеш на паролата", "kind": "text" },
+      { "name": "sessionVersion", "label": "Версия на сесията", "kind": "text" },
+      { "name": "failedLogins", "label": "Грешни опити", "kind": "text" },
+      { "name": "lockedUntil", "label": "Заключен до", "kind": "text" },
+      { "name": "resetTokenHash", "label": "Хеш на еднократен линк", "kind": "text", "indexed": true },
+      { "name": "resetExpires", "label": "Линкът изтича", "kind": "text" },
+      { "name": "resetSentAt", "label": "Линкът е издаден", "kind": "text" },
+      { "name": "googleId", "label": "Свързан Google", "kind": "text", "indexed": true },
+      { "name": "microsoftId", "label": "Свързан Microsoft", "kind": "text", "indexed": true },
+      { "name": "lastLoginAt", "label": "Последен вход", "kind": "date" },
+      { "name": "createdAt", "label": "Създаден", "kind": "date" }
+    ]
+  },
+  "audit": {
+    "title": "Cloud - История",
+    "titleLabel": "ID събитие",
+    "columns": [
+      { "name": "entity", "label": "Раздел", "kind": "text", "indexed": true },
+      { "name": "recordId", "label": "Запис", "kind": "text", "indexed": true },
+      { "name": "occurredAt", "label": "Кога", "kind": "date" },
+      { "name": "actor", "label": "Потребител", "kind": "text" },
+      { "name": "actorName", "label": "Име", "kind": "text" },
+      { "name": "action", "label": "Действие", "kind": "text" },
+      { "name": "summary", "label": "Подробности", "kind": "multiline" }
+    ]
+  },
+  "settings": {
+    "title": "Cloud - Настройки",
+    "titleLabel": "Ключ",
+    "columns": [
+      { "name": "value", "label": "Стойност", "kind": "multiline" },
+      { "name": "updatedAt", "label": "Обновено", "kind": "date" },
+      { "name": "updatedBy", "label": "Обновил", "kind": "text" }
+    ]
+  }
+}

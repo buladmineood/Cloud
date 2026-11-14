@@ -1,0 +1,24 @@
+name = "buladmin-cloud-api"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+workers_dev = false
+routes = [{ pattern = "cloud.buladmin.eu/api/*", zone_name = "buladmin.eu" }]
+
+# Тайните НЕ са тук. Качват се с `npm run secrets` от worker/.dev.vars; виж docs/SETUP.md.
+[vars]
+APP_ORIGIN = "https://cloud.buladmin.eu"
+SP_HOSTNAME = "bulmaileu.sharepoint.com"
+SP_SITE_PATH = "/sites/cloud"
+GRAPH_TENANT_ID = "16d24843-7704-4206-87f4-bc20073547ac"
+GOOGLE_CLIENT_ID = "330949049619-7ctn8s1m3eathirtv40sbm9naj5ef3bc.apps.googleusercontent.com"
+MS_CLIENT_ID = "cd4ae5dd-43c4-4de0-8565-e40b7fd7edd8"
+MS_CERT_THUMBPRINT = "Wcb4nAO72uwFyvZP2VpyPy_5cQZ7fUB0HdI347EbQq4"
+# Остава "false", докато кутията в MAIL_FROM не получи право да праща (scripts/setup-mail.ps1 от портала).
+MAIL_ENABLED = "false"
+MAIL_FROM = "no-reply@cloud.buladmin.eu"
+
+# Ограничение на опитите за вход и линкове: до 20 заявки в минута от един IP адрес за всеки вид.
+[[ratelimits]]
+name = "LOGIN_LIMITER"
+namespace_id = "1002"
+simple = { limit = 20, period = 60 }

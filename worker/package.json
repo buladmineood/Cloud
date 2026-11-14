@@ -1,0 +1,13 @@
+{
+  "name": "buladmin-cloud-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/",
+    "dev": "node dev/server.mjs",
+    "provision": "node scripts/provision.mjs",
+    "secrets": "node scripts/push-secrets.mjs",
+    "stamp": "node scripts/stamp-assets.mjs",
+    "deploy": "npx wrangler@4 deploy"
+  }
+}

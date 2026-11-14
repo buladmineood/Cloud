@@ -1,0 +1,108 @@
+// Оферти, проформи, фактури и кредитни известия: редове, суми, ДДС и номерация.
+import { clean, MAX_TEXT, parseNumber, round2 } from './validate.js';
+
+export const DOC_TYPES = ['Оферта', 'Проформа фактура', 'Фактура', 'Кредитно известие'];
+export const VAT_RATES = [20, 9, 0];
+export const MAX_LINES = 100;
+// Фактурите и известията към тях са с обща поредица от 10 цифри (чл. 78 ППЗДДС).
+export const TAX_DOCS = ['Фактура', 'Кредитно известие'];
+const PREFIX = { 'Оферта': 'OF', 'Проформа фактура': 'PF' };
+
+export const DEFAULT_COMPANY = {
+  name: '', eik: '', vatNumber: '', mol: '', city: '', address: '', phone: '', email: '',
+  iban: '', bank: '', bic: '', vatRegistered: 'Да', invoiceStart: '1', dueDays: '7', currency: 'EUR',
+};
+
+export function parseJson(text, fallback) {
+  if (!text) return fallback;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return fallback;
+  }
+}
+
+// Връща нормализираните редове или грешка, подходяща за показване на потребителя.
+export function validateLines(raw, productsById) {
+  if (!Array.isArray(raw) || raw.length === 0) return { error: 'Добавете поне един ред.' };
+  if (raw.length > MAX_LINES) return { error: `Документът може да има до ${MAX_LINES} реда.` };
+  const lines = [];
+  for (const [i, row] of raw.entries()) {
+    const n = i + 1;
+    if (!row || typeof row !== 'object') return { error: `Ред ${n} е невалиден.` };
+    const productId = clean(row.productId, 40);
+    if (productId && !productsById.has(productId)) return { error: `Ред ${n}: артикулът не съществува.` };
+    const name = clean(row.name, MAX_TEXT);
+    if (!name) return { error: `Ред ${n}: въведете наименование.` };
+    const qty = parseNumber(row.qty);
+    const price = parseNumber(row.price);
+    const discount = row.discount === '' || row.discount === undefined ? 0 : parseNumber(row.discount);
+    const vatRate = parseNumber(row.vatRate);
+    if (!(qty > 0) || qty > 1e7) return { error: `Ред ${n}: количеството трябва да е положително число.` };
+    if (!(price >= 0) || price > 1e10) return { error: `Ред ${n}: невалидна цена.` };
+    if (!(discount >= 0 && discount <= 100)) return { error: `Ред ${n}: отстъпката е между 0 и 100%.` };
+    if (!VAT_RATES.includes(vatRate)) return { error: `Ред ${n}: ДДС ставката е 20, 9 или 0%.` };
+    lines.push({
+      productId,
+      name,
+      unit: clean(row.unit, 20) || 'бр.',
+      qty: Math.round(qty * 1000) / 1000,
+      price: Math.round(price * 10000) / 10000,
+      discount: round2(discount),
+      vatRate,
+    });
+  }
+  return { lines };
+}
+
+export const lineNet = (l) => round2(l.qty * l.price * (1 - l.discount / 100));
+
+// ДДС се смята върху данъчната основа за всяка ставка, а не по редове, за да няма разлика от закръгляне.
+export function computeTotals(lines, docType) {
+  const bases = new Map();
+  for (const line of lines) bases.set(line.vatRate, round2((bases.get(line.vatRate) || 0) + lineNet(line)));
+  let subtotal = 0;
+  let vatAmount = 0;
+  const byRate = [];
+  for (const [rate, base] of [...bases].sort((a, b) => b[0] - a[0])) {
+    const vat = round2((base * rate) / 100);
+    byRate.push({ rate, base, vat });
+    subtotal = round2(subtotal + base);
+    vatAmount = round2(vatAmount + vat);
+  }
+  // Кредитното известие намалява оборота, затова сумите му се пазят с минус.
+  const sign = docType === 'Кредитно известие' ? -1 : 1;
+  return {
+    subtotal: sign * subtotal,
+    vatAmount: sign * vatAmount,
+    total: sign * round2(subtotal + vatAmount),
+    byRate: byRate.map((r) => ({ rate: r.rate, base: sign * r.base, vat: sign * r.vat })),
+  };
+}
+
+// Следващ номер: 10 цифри за фактури и известия, OF-2026-0001 / PF-2026-0001 за оферти и проформи.
+export function nextNumber(documents, docType, { year, invoiceStart = 1 }) {
+  if (TAX_DOCS.includes(docType)) {
+    const used = documents
+      .filter((d) => TAX_DOCS.includes(d.docType) && /^\d{10}$/.test(d.number))
+      .map((d) => Number(d.number));
+    const next = Math.max(Number(invoiceStart) || 1, used.length ? Math.max(...used) + 1 : 1);
+    return String(next).padStart(10, '0');
+  }
+  const prefix = `${PREFIX[docType]}-${year}-`;
+  const used = documents
+    .filter((d) => d.docType === docType && d.number.startsWith(prefix))
+    .map((d) => Number(d.number.slice(prefix.length)) || 0);
+  return `${prefix}${String((used.length ? Math.max(...used) : 0) + 1).padStart(4, '0')}`;
+}
+
+export function paymentStatusOf(total, paid) {
+  if (paid <= 0) return 'Неплатен';
+  return paid + 0.004 >= Math.abs(total) ? 'Платен' : 'Частично платен';
+}
+
+export const addDays = (day, days) => {
+  const date = new Date(`${day}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+};

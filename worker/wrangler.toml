@@ -10,7 +10,7 @@ APP_ORIGIN = "https://cloud.buladmin.eu"
 SP_HOSTNAME = "bulmaileu.sharepoint.com"
 SP_SITE_PATH = "/sites/cloud"
 GRAPH_TENANT_ID = "16d24843-7704-4206-87f4-bc20073547ac"
-GOOGLE_CLIENT_ID = "330949049619-7ctn8s1m3eathirtv40sbm9naj5ef3bc.apps.googleusercontent.com"
+GOOGLE_CLIENT_ID = "330949049619-gm550u4mq9qtd7gc2tj8bd55cc86g23s.apps.googleusercontent.com"
 MS_CLIENT_ID = "0f8a9dda-96cf-44ef-a92d-34804ad51d18"
 MS_CERT_THUMBPRINT = "bj_ulRIfr8ADQUzNsS7q5wWRc_7WqSG9ZOQz1yDl_z8"
 # Кутията в MAIL_FROM има право да праща само от себе си (scripts/setup-mail.ps1, Exchange RBAC).

@@ -19,7 +19,7 @@ Microsoft 365 частта е **настроена на 14 ноември 2026 �
 powershell -ExecutionPolicy Bypass -File worker\scripts\new-certificate.ps1
 ```
 
-Скриптът прави сертификата (`.secrets/buladmin-cloud.cer`), частния ключ (`MS_CERT_PRIVATE_KEY`), `SESSION_SECRET` и `PASSWORD_PEPPER` и отпечатва `MS_CERT_THUMBPRINT` за `wrangler.toml`. Съществуващи тайни не се презаписват. **Пазете `.dev.vars` на сигурно място:** без `PASSWORD_PEPPER` паролите спират да работят, а без ключа приложението не може да влезе в Microsoft. За вход с Google добавете `GOOGLE_CLIENT_SECRET` (от OAuth клиента на портала).
+Скриптът прави сертификата (`.secrets/buladmin-cloud.cer`), частния ключ (`MS_CERT_PRIVATE_KEY`), `SESSION_SECRET` и `PASSWORD_PEPPER` и отпечатва `MS_CERT_THUMBPRINT` за `wrangler.toml`. Съществуващи тайни не се презаписват. **Пазете `.dev.vars` на сигурно място:** без `PASSWORD_PEPPER` паролите спират да работят, а без ключа приложението не може да влезе в Microsoft. За вход с Google добавете `GOOGLE_CLIENT_SECRET` на OAuth клиента на cloud (`330949049619-gm550u…`).
 
 ## 1. SharePoint сайт
 
@@ -52,7 +52,7 @@ node scripts/setup-microsoft.mjs --admin ваш-имейл@bulmail.eu --name "В
 
 ## 3. Google
 
-В Google Cloud Console → APIs & Services → Credentials → OAuth клиента на портала добавете в **Authorized redirect URIs**:
+Cloud има собствен OAuth клиент в Google: `330949049619-gm550u4mq9qtd7gc2tj8bd55cc86g23s` (`GOOGLE_CLIENT_ID` в `wrangler.toml`), отделен от този на портала. В Google Cloud Console → APIs & Services → Credentials в него трябва да има в **Authorized redirect URIs**:
 
 ```
 https://cloud.buladmin.eu/api/auth/google/callback

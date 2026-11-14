@@ -1,13 +1,16 @@
-import { api, h, showError, showFieldErrors } from './core.js?v=3806c5bf79';
+import { api, h, showError, showFieldErrors } from './core.js?v=1f3dfa6dd8';
 
 const form = document.getElementById('login-form');
 const alert = document.getElementById('form-alert');
 const submit = document.getElementById('login-submit');
+const modeLogin = document.getElementById('mode-login');
+const modeSignup = document.getElementById('mode-signup');
+let signup = false;
 
 const MESSAGES = {
   login: 'Входът не успя. Опитайте отново.',
-  noaccount: 'Няма потребител с този акаунт. Влезте с имейла, на който сте поканени, или помолете администратор за покана.',
-  inactive: 'Профилът Ви е деактивиран. Обърнете се към администратор.',
+  exists: 'Вече има профил с този имейл. Влезте с паролата си или с Google и после свържете Microsoft от „Профил“.',
+  inactive: 'Профилът Ви е блокиран. Свържете се с БУЛАДМИН.',
 };
 const error = new URLSearchParams(location.search).get('error');
 if (error) {
@@ -17,12 +20,33 @@ if (error) {
   history.replaceState(null, '', location.pathname);
 }
 
+function setMode(value) {
+  signup = value;
+  modeLogin.setAttribute('aria-pressed', String(!signup));
+  modeSignup.setAttribute('aria-pressed', String(signup));
+  submit.textContent = signup ? 'Създайте профил' : 'Вход';
+  form.elements.password.autocomplete = signup ? 'new-password' : 'current-password';
+  document.getElementById('password-hint').hidden = !signup;
+  document.getElementById('name-field').hidden = !signup;
+  document.getElementById('forgot-area').hidden = signup;
+  for (const label of document.querySelectorAll('.provider-label')) {
+    label.textContent = label.textContent.replace(/^(Вход|Регистрация) с/, signup ? 'Регистрация с' : 'Вход с');
+  }
+  alert.replaceChildren();
+  showFieldErrors(form, {});
+}
+modeLogin.addEventListener('click', () => setMode(false));
+modeSignup.addEventListener('click', () => setMode(true));
+if (location.hash === '#signup') setMode(true);
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   alert.replaceChildren();
   submit.disabled = true;
+  const body = { email: form.elements.email.value, password: form.elements.password.value };
+  if (signup) body.fullName = form.elements.fullName.value;
   try {
-    await api('/auth/login', { method: 'POST', body: { email: form.elements.email.value, password: form.elements.password.value } });
+    await api(signup ? '/auth/signup' : '/auth/login', { method: 'POST', body });
     location.replace('/app.html');
   } catch (err) {
     showFieldErrors(form, err.fields);

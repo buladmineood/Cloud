@@ -25,19 +25,28 @@ export class ApiError extends Error {
   }
 }
 
-export async function api(path, { method = 'GET', body } = {}) {
+// Избраната организация отива като заглавка към всяка заявка.
+let currentOrg = '';
+export const setOrg = (id) => { currentOrg = id || ''; };
+
+export async function api(path, { method = 'GET', body, bytes, type, raw = false } = {}) {
   let res;
+  const headers = {};
+  if (currentOrg) headers['x-org'] = currentOrg;
+  if (body !== undefined) headers['content-type'] = 'application/json';
+  if (bytes !== undefined) headers['content-type'] = type;
   try {
     res = await fetch(`/api${path}`, {
       method,
       credentials: 'same-origin',
-      headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers,
+      body: bytes !== undefined ? bytes : body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
     throw new ApiError(0, 'Няма връзка със сървъра. Проверете интернета и опитайте отново.');
   }
   const isJson = (res.headers.get('content-type') || '').includes('application/json');
+  if (res.ok && raw) return new Uint8Array(await res.arrayBuffer());
   const data = isJson ? await res.json() : null;
   if (!res.ok) {
     throw new ApiError(res.status, data?.error?.message || 'Услугата временно не е достъпна. Опитайте отново след малко.', data?.error?.fields);
@@ -163,6 +172,7 @@ const ICONS = {
   send: 'M22 2L11 13M22 2l-7 20-4-9-9-4z',
   list: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
   board: 'M3 3h7v18H3zM14 3h7v10h-7z',
+  arrow: 'M5 12h14M13 6l6 6-6 6',
 };
 
 export function icon(name, size = 20) {
@@ -301,7 +311,21 @@ export function downloadCsv(filename, header, rows) {
 
 // --- Рамка на приложението ---
 
-export function mountShell({ user, detail, nav }) {
+// На телефон изборът на организация е в горната лента: копие на падащото меню, свързано със същото действие.
+function mobileSwitcher(switcher) {
+  const select = switcher.querySelector('select');
+  if (!select) return null;
+  const copy = select.cloneNode(true);
+  copy.className = 'org-switch__select org-switch__select--top';
+  copy.removeAttribute('id');
+  copy.addEventListener('change', () => {
+    select.value = copy.value;
+    select.dispatchEvent(new Event('change'));
+  });
+  return copy;
+}
+
+export function mountShell({ user, detail, nav, switcher }) {
   const main = h('main', { class: 'app__main', id: 'main', tabindex: '-1' });
   const navList = h('ul', { class: 'app__nav-list' });
   const logout = async () => {
@@ -314,11 +338,13 @@ export function mountShell({ user, detail, nav }) {
   const shell = h('div', { class: 'app' },
     h('header', { class: 'app__top' },
       brand(),
+      switcher?.cloneNode && switcher.dataset.mobile !== 'no' && mobileSwitcher(switcher),
       h('div', { class: 'app__top-actions' },
         window.baTheme?.button('icon-btn icon-btn--light'),
         h('button', { class: 'icon-btn icon-btn--light', type: 'button', 'aria-label': 'Изход', title: 'Изход', onclick: logout }, icon('logout', 20)))),
     h('aside', { class: 'app__side' },
       h('div', { class: 'app__brand' }, brand(), h('span', { class: 'app__tag' }, 'CRM · ERP')),
+      switcher,
       h('nav', { class: 'app__nav', 'aria-label': 'Основно меню' }, navList),
       h('div', { class: 'app__user' },
         h('a', { class: 'app__user-text', href: '#/me' }, h('strong', {}, user), detail && h('span', {}, detail)),

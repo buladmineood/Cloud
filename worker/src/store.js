@@ -155,6 +155,45 @@ export class GraphStore {
     this.itemIds.delete(`${table}:${id}`);
   }
 
+  // --- Файлове в библиотеката „Документи“ на сайта (лога и PDF) ---
+
+  // Адресът на сайта с „:“ не може да се комбинира с път на файл с „:“, затова се взима ID на библиотеката.
+  async driveUrl() {
+    if (!this.driveId) {
+      const drive = await this.request(`${GRAPH}/sites/${this.env.SP_HOSTNAME}:${this.env.SP_SITE_PATH}:/drive?$select=id`);
+      this.driveId = drive.id;
+    }
+    return `${GRAPH}/drives/${this.driveId}`;
+  }
+
+  // Файловете тук са до няколко MB, затова стига обикновено качване; съществуващ файл се заменя.
+  async uploadFile(path, bytes, contentType) {
+    const encoded = path.split('/').map(encodeURIComponent).join('/');
+    const res = await this.fetch(`${await this.driveUrl()}/root:/${encoded}:/content?@microsoft.graph.conflictBehavior=replace`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${await this.accessToken()}`, 'content-type': contentType },
+      body: bytes,
+    });
+    if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+    return (await res.json()).id;
+  }
+
+  async downloadFile(itemId) {
+    const res = await this.fetch(`${await this.driveUrl()}/items/${encodeURIComponent(itemId)}/content`, {
+      headers: { authorization: `Bearer ${await this.accessToken()}` },
+    });
+    if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  async deleteFile(itemId) {
+    const res = await this.fetch(`${await this.driveUrl()}/items/${encodeURIComponent(itemId)}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${await this.accessToken()}` },
+    });
+    if (!res.ok && res.status !== 404) throw new Error(`Delete failed: ${res.status}`);
+  }
+
   sendMail(from, to, subject, { html }) {
     return this.request(`${GRAPH}/users/${encodeURIComponent(from)}/sendMail`, {
       method: 'POST',
@@ -176,7 +215,20 @@ export class MemoryStore {
     this.tables = Object.fromEntries(Object.keys(schema).map((key) => [key, []]));
     Object.assign(this.tables, structuredClone(seed));
     this.sentMail = [];
+    this.files = new Map();
   }
+  async uploadFile(path, bytes, contentType) {
+    const existing = [...this.files].find(([, f]) => f.path === path);
+    const id = existing ? existing[0] : `item-${this.files.size + 1}`;
+    this.files.set(id, { path, bytes: new Uint8Array(bytes), contentType });
+    return id;
+  }
+  async downloadFile(itemId) {
+    const file = this.files.get(itemId);
+    if (!file) throw new Error('missing');
+    return file.bytes;
+  }
+  async deleteFile(itemId) { this.files.delete(itemId); }
   async sendMail(from, to, subject, { html, text }) { this.sentMail.push({ from, to, subject, text, html }); }
   async list(table) { return this.tables[table].map((r) => ({ ...r })); }
   async find(table, field, value) { return (await this.list(table)).filter((r) => r[field] === value); }

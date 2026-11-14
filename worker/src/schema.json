@@ -1,4 +1,90 @@
 {
+  "orgs": {
+    "title": "Cloud - Организации",
+    "titleLabel": "ID организация",
+    "prefix": "ORG",
+    "columns": [
+      { "name": "name", "label": "Наименование", "kind": "text" },
+      { "name": "eik", "label": "ЕИК", "kind": "text", "indexed": true },
+      { "name": "vatRegistered", "label": "Регистрирана по ДДС", "kind": "choice", "choices": ["Да", "Не"] },
+      { "name": "vatNumber", "label": "ДДС номер", "kind": "text" },
+      { "name": "mol", "label": "МОЛ", "kind": "text" },
+      { "name": "city", "label": "Населено място", "kind": "text" },
+      { "name": "address", "label": "Адрес", "kind": "text" },
+      { "name": "phone", "label": "Телефон", "kind": "text" },
+      { "name": "email", "label": "Имейл", "kind": "text" },
+      { "name": "iban", "label": "IBAN", "kind": "text" },
+      { "name": "bic", "label": "BIC", "kind": "text" },
+      { "name": "bank", "label": "Банка", "kind": "text" },
+      { "name": "invoiceStart", "label": "Начален номер на фактурите", "kind": "text" },
+      { "name": "dueDays", "label": "Срок за плащане (дни)", "kind": "text" },
+      { "name": "planId", "label": "План", "kind": "text", "indexed": true },
+      { "name": "planUntil", "label": "Платен план до", "kind": "day" },
+      { "name": "orgStatus", "label": "Статус", "kind": "choice", "choices": ["Активна", "Спряна"], "indexed": true },
+      { "name": "logoItemId", "label": "Лого в SharePoint", "kind": "text" },
+      { "name": "logoType", "label": "Вид на логото", "kind": "text" },
+      { "name": "adminNotes", "label": "Бележки на БУЛАДМИН", "kind": "multiline" },
+      { "name": "createdBy", "label": "Регистрирал", "kind": "text" },
+      { "name": "createdAt", "label": "Регистрирана", "kind": "date" },
+      { "name": "updatedAt", "label": "Обновена", "kind": "date" }
+    ]
+  },
+  "plans": {
+    "title": "Cloud - Планове",
+    "titleLabel": "Код на плана",
+    "columns": [
+      { "name": "name", "label": "Име", "kind": "text" },
+      { "name": "description", "label": "Описание", "kind": "multiline" },
+      { "name": "price", "label": "Цена на месец (EUR)", "kind": "number" },
+      { "name": "maxUsers", "label": "Потребители", "kind": "number" },
+      { "name": "maxCompanies", "label": "Контрагенти", "kind": "number" },
+      { "name": "maxContacts", "label": "Лица за контакт", "kind": "number" },
+      { "name": "maxProducts", "label": "Артикули", "kind": "number" },
+      { "name": "maxDeals", "label": "Отворени сделки", "kind": "number" },
+      { "name": "maxInvoices", "label": "Фактури и проформи на месец", "kind": "number" },
+      { "name": "maxOffers", "label": "Оферти на месец", "kind": "number" },
+      { "name": "allowLogo", "label": "Лого в документите", "kind": "choice", "choices": ["Да", "Не"] },
+      { "name": "isDefault", "label": "План при регистрация", "kind": "choice", "choices": ["Да", "Не"] },
+      { "name": "isActive", "label": "Предлага се", "kind": "choice", "choices": ["Да", "Не"] },
+      { "name": "sortOrder", "label": "Подредба", "kind": "number" }
+    ]
+  },
+  "members": {
+    "title": "Cloud - Членства",
+    "titleLabel": "ID членство",
+    "columns": [
+      { "name": "orgId", "label": "Организация", "kind": "text", "indexed": true },
+      { "name": "userId", "label": "Потребител", "kind": "text", "indexed": true },
+      { "name": "role", "label": "Роля", "kind": "choice", "choices": ["Администратор", "Потребител", "Наблюдател"] },
+      { "name": "isActive", "label": "Активно", "kind": "choice", "choices": ["Да", "Не"] },
+      { "name": "invitedBy", "label": "Поканил", "kind": "text" },
+      { "name": "createdAt", "label": "Създадено", "kind": "date" }
+    ]
+  },
+  "users": {
+    "title": "Cloud - Потребители",
+    "titleLabel": "Имейл за вход",
+    "columns": [
+      { "name": "fullName", "label": "Име", "kind": "text" },
+      { "name": "isActive", "label": "Активен", "kind": "choice", "choices": ["Да", "Не"] },
+      { "name": "platformRole", "label": "Роля в БУЛАДМИН", "kind": "choice", "choices": ["Администратор на БУЛАДМИН"] },
+      { "name": "jobTitle", "label": "Длъжност", "kind": "text" },
+      { "name": "passwordHash", "label": "Хеш на паролата", "kind": "text" },
+      { "name": "sessionVersion", "label": "Версия на сесията", "kind": "text" },
+      { "name": "failedLogins", "label": "Грешни опити", "kind": "text" },
+      { "name": "lockedUntil", "label": "Заключен до", "kind": "text" },
+      { "name": "resetTokenHash", "label": "Хеш на еднократен линк", "kind": "text", "indexed": true },
+      { "name": "resetExpires", "label": "Линкът изтича", "kind": "text" },
+      { "name": "resetSentAt", "label": "Линкът е издаден", "kind": "text" },
+      { "name": "emailVerifiedAt", "label": "Имейлът е потвърден", "kind": "text" },
+      { "name": "verifyTokenHash", "label": "Хеш на потвърждение", "kind": "text", "indexed": true },
+      { "name": "verifyExpires", "label": "Потвърждението изтича", "kind": "text" },
+      { "name": "googleId", "label": "Свързан Google", "kind": "text", "indexed": true },
+      { "name": "microsoftId", "label": "Свързан Microsoft", "kind": "text", "indexed": true },
+      { "name": "lastLoginAt", "label": "Последен вход", "kind": "date" },
+      { "name": "createdAt", "label": "Създаден", "kind": "date" }
+    ]
+  },
   "companies": {
     "title": "Cloud - Контрагенти",
     "titleLabel": "ID контрагент",
@@ -8,6 +94,7 @@
     "single": "Контрагент",
     "display": "name",
     "columns": [
+      { "name": "orgId", "label": "Организация", "kind": "text", "indexed": true, "system": true, "hidden": true },
       { "name": "name", "label": "Наименование", "kind": "text", "required": true, "list": true },
       { "name": "relation", "label": "Вид", "kind": "choice", "choices": ["Клиент", "Потенциален клиент", "Доставчик", "Партньор"], "indexed": true, "list": true, "default": "Клиент" },
       { "name": "eik", "label": "ЕИК/БУЛСТАТ", "kind": "text", "input": "eik", "indexed": true, "list": true },
@@ -32,8 +119,12 @@
     "generic": true,
     "label": "Лица за контакт",
     "single": "Лице за контакт",
-    "display": ["firstName", "lastName"],
+    "display": [
+      "firstName",
+      "lastName"
+    ],
     "columns": [
+      { "name": "orgId", "label": "Организация", "kind": "text", "indexed": true, "system": true, "hidden": true },
       { "name": "firstName", "label": "Име", "kind": "text", "required": true, "list": true },
       { "name": "lastName", "label": "Фамилия", "kind": "text" },
       { "name": "companyId", "label": "Контрагент", "kind": "text", "input": "ref", "ref": "companies", "indexed": true, "list": true },
@@ -54,6 +145,7 @@
     "single": "Сделка",
     "display": "title",
     "columns": [
+      { "name": "orgId", "label": "Организация", "kind": "text", "indexed": true, "system": true, "hidden": true },
       { "name": "title", "label": "Сделка", "kind": "text", "required": true, "list": true },
       { "name": "companyId", "label": "Контрагент", "kind": "text", "input": "ref", "ref": "companies", "required": true, "indexed": true, "list": true },
       { "name": "contactId", "label": "Лице за контакт", "kind": "text", "input": "ref", "ref": "contacts", "indexed": true },
@@ -77,6 +169,7 @@
     "single": "Задача",
     "display": "subject",
     "columns": [
+      { "name": "orgId", "label": "Организация", "kind": "text", "indexed": true, "system": true, "hidden": true },
       { "name": "subject", "label": "Задача", "kind": "text", "required": true, "list": true, "wide": true },
       { "name": "activityType", "label": "Вид", "kind": "choice", "choices": ["Задача", "Обаждане", "Среща", "Имейл", "Бележка"], "list": true, "default": "Задача" },
       { "name": "dueDate", "label": "Срок", "kind": "day", "list": true },
@@ -100,6 +193,7 @@
     "single": "Артикул",
     "display": "name",
     "columns": [
+      { "name": "orgId", "label": "Организация", "kind": "text", "indexed": true, "system": true, "hidden": true },
       { "name": "code", "label": "Код", "kind": "text", "indexed": true, "list": true },
       { "name": "name", "label": "Наименование", "kind": "text", "required": true, "list": true },
       { "name": "itemType", "label": "Вид", "kind": "choice", "choices": ["Услуга", "Стока"], "list": true, "default": "Услуга" },
@@ -121,6 +215,7 @@
     "single": "Документ",
     "display": "number",
     "columns": [
+      { "name": "orgId", "label": "Организация", "kind": "text", "indexed": true, "system": true, "hidden": true },
       { "name": "docType", "label": "Вид", "kind": "choice", "choices": ["Оферта", "Проформа фактура", "Фактура", "Кредитно известие"], "indexed": true },
       { "name": "number", "label": "Номер", "kind": "text", "indexed": true },
       { "name": "docStatus", "label": "Статус", "kind": "choice", "choices": ["Чернова", "Издаден", "Приета", "Отказана", "Анулиран"], "indexed": true },
@@ -147,7 +242,8 @@
       { "name": "issuedBy", "label": "Съставил", "kind": "text" },
       { "name": "issuedAt", "label": "Издаден на", "kind": "date" },
       { "name": "createdAt", "label": "Създаден", "kind": "date" },
-      { "name": "updatedAt", "label": "Обновен", "kind": "date" }
+      { "name": "updatedAt", "label": "Обновен", "kind": "date" },
+      { "name": "pdfItemId", "label": "PDF в SharePoint", "kind": "text" }
     ]
   },
   "payments": {
@@ -157,6 +253,7 @@
     "label": "Плащания",
     "single": "Плащане",
     "columns": [
+      { "name": "orgId", "label": "Организация", "kind": "text", "indexed": true, "system": true, "hidden": true },
       { "name": "documentId", "label": "Документ", "kind": "text", "indexed": true },
       { "name": "companyId", "label": "Контрагент", "kind": "text", "indexed": true },
       { "name": "paidAt", "label": "Дата", "kind": "day" },
@@ -167,31 +264,11 @@
       { "name": "createdAt", "label": "Въведено на", "kind": "date" }
     ]
   },
-  "users": {
-    "title": "Cloud - Потребители",
-    "titleLabel": "Имейл за вход",
-    "columns": [
-      { "name": "fullName", "label": "Име", "kind": "text" },
-      { "name": "role", "label": "Роля", "kind": "choice", "choices": ["Администратор", "Потребител", "Наблюдател"] },
-      { "name": "isActive", "label": "Активен", "kind": "choice", "choices": ["Да", "Не"] },
-      { "name": "jobTitle", "label": "Длъжност", "kind": "text" },
-      { "name": "passwordHash", "label": "Хеш на паролата", "kind": "text" },
-      { "name": "sessionVersion", "label": "Версия на сесията", "kind": "text" },
-      { "name": "failedLogins", "label": "Грешни опити", "kind": "text" },
-      { "name": "lockedUntil", "label": "Заключен до", "kind": "text" },
-      { "name": "resetTokenHash", "label": "Хеш на еднократен линк", "kind": "text", "indexed": true },
-      { "name": "resetExpires", "label": "Линкът изтича", "kind": "text" },
-      { "name": "resetSentAt", "label": "Линкът е издаден", "kind": "text" },
-      { "name": "googleId", "label": "Свързан Google", "kind": "text", "indexed": true },
-      { "name": "microsoftId", "label": "Свързан Microsoft", "kind": "text", "indexed": true },
-      { "name": "lastLoginAt", "label": "Последен вход", "kind": "date" },
-      { "name": "createdAt", "label": "Създаден", "kind": "date" }
-    ]
-  },
   "audit": {
     "title": "Cloud - История",
     "titleLabel": "ID събитие",
     "columns": [
+      { "name": "orgId", "label": "Организация", "kind": "text", "indexed": true, "system": true, "hidden": true },
       { "name": "entity", "label": "Раздел", "kind": "text", "indexed": true },
       { "name": "recordId", "label": "Запис", "kind": "text", "indexed": true },
       { "name": "occurredAt", "label": "Кога", "kind": "date" },

@@ -8,47 +8,55 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'">
 <link rel="icon" href="/assets/img/favicon-32.png" sizes="32x32">
 <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
-<script src="/assets/js/theme.js?v=3806c5bf79"></script>
-<link rel="stylesheet" href="/assets/css/cloud.css?v=3806c5bf79">
-<link rel="stylesheet" href="/assets/css/crm.css?v=3806c5bf79">
+<script src="/assets/js/theme.js?v=1f3dfa6dd8"></script>
+<link rel="stylesheet" href="/assets/css/cloud.css?v=1f3dfa6dd8">
+<link rel="stylesheet" href="/assets/css/crm.css?v=1f3dfa6dd8">
 <title>BulAdmin CRM / BulAdmin ERP</title>
 <meta name="description" content="Клиенти, сделки, задачи, оферти, фактури и плащания на едно място.">
-<script type="module" src="/assets/js/login.js?v=3806c5bf79"></script>
+<script type="module" src="/assets/js/login.js?v=1f3dfa6dd8"></script>
 </head>
 <body>
 <header class="site-header"><div class="wrap site-header__inner"><a class="brand" href="/"><img src="/assets/img/logo-mark.webp" alt="" width="38" height="38"><span class="brand__word">БУЛ<b>АДМИН</b></span><span class="brand__tag">CRM · ERP</span></a></div></header>
 <main id="main"><div class="wrap login">
   <section>
     <h1>BulAdmin CRM / BulAdmin ERP</h1>
-    <p class="login__lead">Клиенти, сделки и задачи, оферти, фактури и плащания в една система. Данните се пазят в Microsoft 365 на фирмата.</p>
+    <p class="login__lead">Клиенти, сделки и задачи, оферти, фактури с PDF и плащания в една система. Регистрирайте фирмата си безплатно.</p>
     <ol class="steps">
-      <li><b>1</b><span><strong>CRM:</strong> контрагенти, лица за контакт, сделки по етапи и задачи с срокове.</span></li>
-      <li><b>2</b><span><strong>ERP:</strong> артикули и услуги, оферти, проформи, фактури и кредитни известия.</span></li>
-      <li><b>3</b><span><strong>Плащания:</strong> какво е платено, какво остава и кое е просрочено.</span></li>
-      <li><b>4</b><span><strong>История:</strong> кой какво е създал и променил.</span></li>
+      <li><b>1</b><span><strong>CRM:</strong> контрагенти, лица за контакт, сделки по етапи и задачи със срокове.</span></li>
+      <li><b>2</b><span><strong>ERP:</strong> артикули и услуги, оферти, проформи, фактури и кредитни известия в PDF.</span></li>
+      <li><b>3</b><span><strong>Няколко фирми:</strong> един профил, превключване между фирмите с едно щракване.</span></li>
+      <li><b>4</b><span><strong>Безплатно:</strong> 1 потребител, до 10 контрагента, 10 фактури и 10 оферти на месец. Повече и лого в документите — с платен план.</span></li>
     </ol>
   </section>
   <section class="card login__card" aria-labelledby="signin-title">
-    <h2 id="signin-title">Вход</h2>
+    <h2 id="signin-title">Вход и регистрация</h2>
+    <div class="segmented" role="group" aria-label="Вход или регистрация">
+      <button type="button" id="mode-login" aria-pressed="true">Вход</button>
+      <button type="button" id="mode-signup" aria-pressed="false">Нова регистрация</button>
+    </div>
     <div id="login-error" class="alert alert--error" role="alert" hidden>Входът не успя. Опитайте отново.</div>
     <a class="btn btn--provider" href="/api/auth/microsoft/start">
       <svg viewBox="0 0 21 21" aria-hidden="true"><path fill="#F25022" d="M1 1h9v9H1z"/><path fill="#7FBA00" d="M11 1h9v9h-9z"/><path fill="#00A4EF" d="M1 11h9v9H1z"/><path fill="#FFB900" d="M11 11h9v9h-9z"/></svg>
-      Вход с Microsoft
+      <span class="provider-label">Вход с Microsoft</span>
     </a>
     <a class="btn btn--provider" href="/api/auth/google/start">
       <svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.7 1.2 9.2 3.6l6.9-6.9C35.9 2.4 30.5 0 24 0 14.6 0 6.5 5.4 2.6 13.2l8 6.2C12.5 13.6 17.8 9.5 24 9.5z"/><path fill="#4285F4" d="M46.9 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.9c-.6 3-2.2 5.5-4.7 7.2l7.3 5.7c4.3-4 6.4-9.8 6.4-17.4z"/><path fill="#FBBC05" d="M10.6 28.6c-.5-1.4-.8-3-.8-4.6s.3-3.2.8-4.6l-8-6.2C.9 16.5 0 20.1 0 24s.9 7.5 2.6 10.8l8-6.2z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.3-5.7c-2.2 1.5-5 2.3-8.6 2.3-6.2 0-11.5-4.1-13.4-9.8l-8 6.2C6.5 42.6 14.6 48 24 48z"/></svg>
-      Вход с Google
+      <span class="provider-label">Вход с Google</span>
     </a>
     <div class="divider"><span>или с имейл и парола</span></div>
     <form id="login-form" class="form" novalidate>
+      <div class="field" id="name-field" hidden><label for="f-fullName">Име и фамилия</label><input id="f-fullName" name="fullName" type="text" autocomplete="name" maxlength="120"></div>
       <div class="field"><label for="f-email">Имейл</label><input id="f-email" name="email" type="email" autocomplete="username" maxlength="200" required></div>
-      <div class="field"><label for="f-password">Парола</label><input id="f-password" name="password" type="password" autocomplete="current-password" maxlength="128" required></div>
+      <div class="field"><label for="f-password">Парола</label><input id="f-password" name="password" type="password" autocomplete="current-password" maxlength="128" required>
+        <div id="password-hint" class="small muted" hidden>Поне 10 знака.</div></div>
       <div id="form-alert" aria-live="polite"></div>
       <button class="btn" type="submit" id="login-submit">Вход</button>
     </form>
-    <p id="forgot-note" class="login__note">Забравена парола? Помолете администратор да Ви изпрати линк за нова.</p>
-    <button type="button" id="forgot-button" class="link-btn small" hidden>Забравена парола?</button>
-    <p class="login__note">Достъпът е само за поканени потребители. С Microsoft или Google влизате с акаунта на същия имейл, на който сте поканени.</p>
+    <div id="forgot-area">
+      <p id="forgot-note" class="login__note">Забравена парола? Пишете на <a href="mailto:call@buladmin.eu">call@buladmin.eu</a>.</p>
+      <button type="button" id="forgot-button" class="link-btn small" hidden>Забравена парола?</button>
+    </div>
+    <p class="login__note">След първия вход регистрирате фирмата си или влизате във фирма, в която сте поканени. Microsoft и Google влизат с акаунта на същия имейл.</p>
   </section>
 </div></main>
 <footer class="site-footer"><div class="wrap"><span>© 2026 БУЛАДМИН</span><span><a href="https://portal.buladmin.eu/">Портал за клиенти</a> · <a href="https://www.buladmin.eu/">buladmin.eu</a></span></div></footer>

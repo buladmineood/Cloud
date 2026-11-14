@@ -1,13 +1,17 @@
 import {
   api, confirmDialog, downloadCsv, emptyState, fatal, field, formatDate, formatTime, formDialog, formValues, h, icon, linkBox,
-  money, mountShell, norm, num, pageHead, parseNum, pill, round2, selectField, showError, showFieldErrors, timeAgo, toast, today,
-} from './core.js?v=3806c5bf79';
+  money, mountShell, norm, num, pageHead, parseNum, pill, round2, selectField, setOrg, showError, showFieldErrors, timeAgo, toast, today,
+} from './core.js?v=1f3dfa6dd8';
+import { buildPdf, saveFile } from './pdf.js?v=1f3dfa6dd8';
 
 let shell;
 let main;
 let meta;
 let me;
-let data;
+let data; // данните на избраната организация; null, ако потребителят още няма организация
+let orgId = '';
+const ORG_KEY = 'bc_org';
+const PLATFORM_ADMIN = 'Администратор на БУЛАДМИН';
 
 const PAGE_SIZE = 50;
 const OPEN_STAGES = ['Нова', 'Квалифицирана', 'Оферта', 'Преговори'];
@@ -16,9 +20,15 @@ const ENTITY_ICONS = { companies: 'building', contacts: 'users', deals: 'handsha
 const CHIP_COLUMN = { companies: 'relation', deals: 'stage', activities: 'activityStatus', products: 'itemType' };
 const PAYMENT_METHODS = ['Банков превод', 'В брой', 'С карта', 'Наложен платеж'];
 
-const role = () => me.user.role;
+const role = () => data?.role || '';
 const isAdmin = () => role() === 'Администратор';
-const canEdit = () => role() !== 'Наблюдател';
+const canEdit = () => !!data && role() !== 'Наблюдател';
+const isPlatform = () => me.user.platformRole === PLATFORM_ADMIN;
+const limitText = (key) => {
+  const limit = data.plan[key];
+  return limit === '' ? `${data.usage[key]}` : `${data.usage[key]} от ${limit}`;
+};
+const atLimit = (key) => data.plan[key] !== '' && data.usage[key] >= data.plan[key];
 const cols = (entity) => meta.entities[entity].columns;
 const col = (entity, name) => cols(entity).find((c) => c.name === name);
 
@@ -50,14 +60,14 @@ const go = (hash) => {
 };
 
 async function refresh() {
-  data = await api('/data');
+  data = orgId ? await api('/data') : null;
   syncBadges();
 }
 
 const isOverdue = (a) => a.activityStatus === 'Предстои' && a.dueDate && a.dueDate < today();
 const myOpenTasks = () => data.activities.filter((a) => a.assignedTo === me.user.email && a.activityStatus === 'Предстои');
 function syncBadges() {
-  shell.setBadges({ activities: myOpenTasks().filter((a) => a.dueDate && a.dueDate <= today()).length });
+  shell?.setBadges(data ? { activities: myOpenTasks().filter((a) => a.dueDate && a.dueDate <= today()).length } : {});
 }
 
 // Изпълнява действие към сървъра, презарежда данните и показва грешката, ако има.
@@ -206,8 +216,15 @@ function viewDashboard() {
     .reduce((sum, d) => sum + d.subtotal, 0);
   const won = data.deals.filter((d) => d.stage === 'Спечелена' && String(d.closedAt).startsWith(month));
 
+  const limited = Object.keys(meta.limits).filter((k) => data.plan[k] !== '');
+  const near = limited.filter((k) => data.usage[k] >= Number(data.plan[k]) * 0.8);
   page(
-    pageHead(`Здравейте, ${me.user.name}`, 'Какво се случва днес в CRM и ERP.'),
+    pageHead(`Здравейте, ${me.user.name}`, `${data.org.name} · план „${data.plan.name}“`),
+    data.viaPlatform && h('div', { class: 'alert alert--warn', role: 'status' }, 'Работите в тази организация като администратор на БУЛАДМИН. Всяко действие се записва в историята.'),
+    near.length > 0 && h('a', { class: 'alert alert--warn banner banner--link', href: '#/settings' }, icon('alert'),
+      h('div', { class: 'banner__text' },
+        h('strong', {}, `Наближавате ограничението на плана „${data.plan.name}“`),
+        h('p', {}, near.map((k) => `${meta.limits[k].label}: ${limitText(k)}`).join(' · ')))),
     overdueDocs.length > 0 && h('a', { class: 'alert alert--error banner banner--link', href: '#/documents?type=Фактура&pay=unpaid' }, icon('alert'),
       h('div', { class: 'banner__text' },
         h('strong', {}, `Просрочени фактури: ${overdueDocs.length} за ${money(overdueDocs.reduce((s, d) => s + outstanding(d), 0))}`),
@@ -751,7 +768,13 @@ function documentEditor(doc, query) {
         });
         if (!ok) { go(`#/documents/${s.id}`); return; }
         const issued = await act(() => api(`/documents/${s.id}/issue`, { method: 'POST' }), `Издаден ${docType}.`);
-        if (issued) go(`#/documents/${s.id}`);
+        if (!issued) return;
+        go(`#/documents/${s.id}`);
+        // PDF на издадения документ се архивира в SharePoint на заден план.
+        archivePdf(find('documents', s.id) || issued)
+          .then(() => refresh())
+          .then(() => { if (location.hash === `#/documents/${s.id}`) route(); })
+          .catch((err) => toast(`PDF не беше архивиран: ${err.message}`, 'error'));
       },
     }, icon('send', 18), 'Издайте'),
     doc && h('button', {
@@ -774,13 +797,49 @@ const partyLines = (p) => [
   p.eik && `ЕИК: ${p.eik}`, p.vatNumber && `ДДС №: ${p.vatNumber}`, [p.city, p.address].filter(Boolean).join(', '), p.mol && `МОЛ: ${p.mol}`,
 ].filter(Boolean);
 
+// Издаденият документ пази данните на страните към момента на издаване; черновата показва текущите.
+function buyerOf(doc) {
+  if (doc.buyer) return doc.buyer;
+  const c = find('companies', doc.companyId) || {};
+  return { name: c.name, eik: c.eik, vatNumber: c.vatNumber, mol: c.mol, city: c.city, address: c.address };
+}
+
+// Логото е платена възможност: показва се само ако планът го позволява.
+const showLogo = () => !!data?.org.hasLogo && data.plan.allowLogo === 'Да';
+let logoVersion = Date.now();
+let logoCache = null;
+const logoSrc = () => `/api/orgs/${encodeURIComponent(orgId)}/logo?v=${logoVersion}`;
+function logoBytes() {
+  if (!showLogo()) return Promise.resolve(null);
+  logoCache ??= api(`/orgs/${encodeURIComponent(orgId)}/logo`, { raw: true })
+    .then((bytes) => ({ bytes, type: bytes[0] === 0x89 ? 'image/png' : 'image/jpeg' }))
+    .catch(() => null);
+  return logoCache;
+}
+
+async function makePdf(doc) {
+  return buildPdf({
+    doc,
+    seller: doc.seller || data.company,
+    buyer: buyerOf(doc),
+    logo: await logoBytes(),
+    related: doc.relatedId && find('documents', doc.relatedId),
+    issuedBy: doc.issuedBy || userName(doc.createdBy),
+  });
+}
+const pdfName = (doc) => `${doc.docType} ${doc.number || 'чернова'}.pdf`;
+async function archivePdf(doc) {
+  const bytes = await makePdf(doc);
+  await api(`/documents/${doc.id}/pdf`, { method: 'PUT', bytes, type: 'application/pdf' });
+}
+
 function documentPrint(doc) {
   const seller = doc.seller || data.company;
-  const company = find('companies', doc.companyId) || {};
-  const buyer = doc.buyer || { name: company.name, eik: company.eik, vatNumber: company.vatNumber, mol: company.mol, city: company.city, address: company.address };
+  const buyer = buyerOf(doc);
   const t = totalsOf(doc.lines, doc.docType);
   const related = doc.relatedId && find('documents', doc.relatedId);
   return h('article', { class: 'doc-print', 'aria-label': `${doc.docType} ${doc.number}` },
+    showLogo() && h('img', { class: 'doc-print__logo', src: logoSrc(), alt: seller.name || 'Лого' }),
     h('header', { class: 'doc-print__head' },
       h('div', {},
         h('h2', { class: 'doc-print__type' }, doc.docType.toUpperCase()),
@@ -807,7 +866,8 @@ function documentPrint(doc) {
         doc.vatExemptReason && h('p', {}, h('strong', {}, 'Основание за неначисляване на ДДС: '), doc.vatExemptReason),
         doc.notes && h('p', { class: 'pre' }, doc.notes),
         h('p', { class: 'small' }, `Съставил: ${doc.issuedBy || userName(doc.createdBy)}`)),
-      totalsBlock(t)));
+      totalsBlock(t)),
+    h('p', { class: 'doc-print__made' }, 'Създадено с BulAdmin Cloud · cloud.buladmin.eu'));
 }
 
 async function viewDocument(id, query) {
@@ -849,7 +909,20 @@ async function viewDocument(id, query) {
   page(
     h('a', { class: 'back no-print', href: '#/documents' }, icon('back', 16), 'Оферти и фактури'),
     h('div', { class: 'no-print' }, pageHead(`${doc.docType} ${doc.number}`, `${doc.companyName} · ${money(doc.total)}`,
-      h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => window.print() }, icon('printer', 18), 'Печат / PDF'))),
+      h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => window.print() }, icon('printer', 18), 'Печат'),
+      h('button', {
+        class: 'btn', type: 'button',
+        onclick: async (event) => {
+          const button = event.currentTarget;
+          button.disabled = true;
+          try {
+            saveFile(await makePdf(doc), pdfName(doc));
+          } catch (err) {
+            toast(err.message, 'error');
+          }
+          button.disabled = false;
+        },
+      }, icon('download', 18), 'PDF'))),
     h('div', { class: 'row no-print' }, pill(doc.docStatus, 'doc'), payable && pill(doc.paymentStatus, 'pay'), actions),
     h('div', { class: 'split' },
       h('div', { class: 'card doc-sheet' }, documentPrint(doc)),
@@ -868,7 +941,19 @@ async function viewDocument(id, query) {
         h('section', { class: 'card' }, h('dl', { class: 'details details--stacked' },
           h('dt', {}, 'Контрагент'), h('dd', {}, refLink('companies', doc.companyId)),
           doc.dealId && [h('dt', {}, 'Сделка'), h('dd', {}, refLink('deals', doc.dealId))],
-          h('dt', {}, 'Издаден'), h('dd', {}, `${formatTime(doc.issuedAt)} · ${doc.issuedBy}`))),
+          h('dt', {}, 'Издаден'), h('dd', {}, `${formatTime(doc.issuedAt)} · ${doc.issuedBy}`),
+          h('dt', {}, 'Архив в SharePoint'),
+          h('dd', {}, doc.hasPdf
+            ? h('button', {
+              class: 'link-btn', type: 'button',
+              onclick: async () => {
+                try { saveFile(await api(`/documents/${id}/pdf`, { raw: true }), pdfName(doc)); } catch (err) { toast(err.message, 'error'); }
+              },
+            }, 'Изтеглете архивния PDF')
+            : [h('span', { class: 'muted' }, 'няма '), canEdit() && doc.docStatus !== 'Чернова' && h('button', {
+              class: 'link-btn', type: 'button',
+              onclick: () => act(() => archivePdf(doc), 'PDF е архивиран в SharePoint.').then(route),
+            }, 'архивирайте')]))),
         await historyCard('documents', id))));
 }
 
@@ -965,8 +1050,36 @@ function viewMe() {
       showError(pwAlert, err.message);
     }
   });
+  const nameAlert = h('div', { 'aria-live': 'polite' });
+  const nameForm = h('form', { class: 'form', novalidate: true },
+    field({ name: 'fullName', label: 'Име и фамилия', value: me.user.name, maxlength: 120 }),
+    field({ name: 'jobTitle', label: 'Длъжност', hint: 'по желание', value: me.user.jobTitle, maxlength: 120 }),
+    nameAlert,
+    h('div', {}, h('button', { class: 'btn', type: 'submit' }, 'Запазете')));
+  nameForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    try {
+      await api('/account', { method: 'PATCH', body: formValues(nameForm) });
+      me = await api('/me');
+      toast('Запазено.');
+    } catch (err) {
+      showFieldErrors(nameForm, err.fields);
+      showError(nameAlert, err.message);
+    }
+  });
   page(
-    pageHead('Моят профил', `${me.user.email} · ${me.user.role}`),
+    pageHead('Моят профил', [me.user.email, isPlatform() && PLATFORM_ADMIN].filter(Boolean).join(' · ')),
+    h('div', { class: 'grid-2' },
+      h('section', { class: 'card' }, h('h2', { style: 'margin-bottom:16px' }, 'Лични данни'), nameForm),
+      h('section', { class: 'card stack' },
+        h('h2', {}, 'Моите организации'),
+        me.orgs.length
+          ? h('ul', { class: 'linked-list' }, me.orgs.map((o) => h('li', { class: 'row row--between' },
+            h('span', {}, h('strong', {}, o.name), ' ', h('span', { class: 'muted small' }, `${o.role} · ${o.plan}`)),
+            o.id === orgId ? h('span', { class: 'small muted' }, 'текуща')
+              : h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: () => selectOrg(o.id) }, 'Отворете'))))
+          : h('p', { class: 'small muted' }, 'Още не сте в организация.'),
+        h('a', { class: 'btn btn--ghost btn--small', href: '#/new-org' }, icon('plus', 16), 'Регистрирайте нова фирма'))),
     h('div', { class: 'grid-2' },
       h('section', { class: 'card stack' },
         h('h2', {}, 'Вход с Google и Microsoft'),
@@ -978,35 +1091,34 @@ function viewMe() {
       h('section', { class: 'card' }, h('h2', { style: 'margin-bottom:16px' }, me.security.password ? 'Смяна на парола' : 'Парола за вход'), form)));
 }
 
-// --- Потребители (администратор) ---
+// --- Членове на организацията (администратор) ---
 
 function showDelivery(result, note) {
-  if (result.emailed) {
-    toast(`Изпратихме имейл до ${result.to}.`);
+  if (result.emailed || !result.link) {
+    toast(result.emailed ? `Изпратихме имейл до ${result.to}.` : 'Добавен. Ще види организацията при следващия вход.');
     return;
   }
-  const box = main.querySelector('#delivery');
-  box?.replaceChildren(linkBox(result.link, note));
+  main.querySelector('#delivery')?.replaceChildren(linkBox(result.link, note));
   window.scrollTo(0, 0);
 }
 
+const ROLE_HELP = () => h('ul', { class: 'bullets small muted' },
+  h('li', {}, 'Администратор: всичко, включително хора, настройки, лого, изтриване и анулиране на фактури.'),
+  h('li', {}, 'Потребител: въвежда и променя данни, издава документи и отбелязва плащания.'),
+  h('li', {}, 'Наблюдател: само преглед и експорт.'));
+
 function viewUsers() {
   const roleSelect = (value) => selectField({ name: 'role', label: 'Роля', options: meta.roles, value });
-  const roleHelp = h('ul', { class: 'bullets small muted' },
-    h('li', {}, 'Администратор: всичко, включително потребители, настройки, изтриване и анулиране на фактури.'),
-    h('li', {}, 'Потребител: въвежда и променя данни, издава документи и отбелязва плащания.'),
-    h('li', {}, 'Наблюдател: само преглед и експорт.'));
   const invite = async () => {
     const result = await formDialog({
-      title: 'Поканете потребител',
+      title: `Поканете в ${data.org.name}`,
       fields: [
         field({ name: 'email', label: 'Имейл', type: 'email', required: true, maxlength: 200 }),
-        field({ name: 'fullName', label: 'Име и фамилия', required: true, maxlength: 120 }),
-        field({ name: 'jobTitle', label: 'Длъжност', hint: 'по желание', maxlength: 120 }),
-        roleSelect('Потребител'), roleHelp,
-        h('p', { class: 'small muted' }, 'Човекът ще може да влиза с Google или Microsoft акаунт с този имейл или с парола от линка в поканата.')],
+        field({ name: 'fullName', label: 'Име и фамилия', hint: 'ако още няма профил', maxlength: 120 }),
+        roleSelect('Потребител'), ROLE_HELP(),
+        h('p', { class: 'small muted' }, 'Ако човекът вече има профил в BulAdmin Cloud, организацията се появява в неговото меню. Иначе получава линк за парола и може да влиза и с Google или Microsoft.')],
       submitLabel: 'Поканете',
-      onSubmit: (body) => api('/admin/users', { method: 'POST', body }),
+      onSubmit: (body) => api('/org/members', { method: 'POST', body }),
     });
     if (!result) return;
     await refresh();
@@ -1016,43 +1128,86 @@ function viewUsers() {
   const edit = async (u) => {
     const result = await formDialog({
       title: u.name,
-      fields: [field({ name: 'fullName', label: 'Име и фамилия', value: u.name, maxlength: 120 }), field({ name: 'jobTitle', label: 'Длъжност', value: u.jobTitle, maxlength: 120 }), roleSelect(u.role), roleHelp],
-      onSubmit: (body) => api(`/admin/users/${encodeURIComponent(u.email)}`, { method: 'PATCH', body }),
+      fields: [roleSelect(u.role), ROLE_HELP()],
+      onSubmit: (body) => api(`/org/members/${encodeURIComponent(u.email)}`, { method: 'PATCH', body }),
     });
     if (result) { await refresh(); toast('Запазено.'); viewUsers(); }
   };
   const rows = [...data.users].sort((a, b) => (a.isActive === b.isActive ? a.name.localeCompare(b.name, 'bg') : a.isActive === 'Да' ? -1 : 1));
   page(
     h('div', { id: 'delivery' }),
-    pageHead('Потребители', `${rows.filter((u) => u.isActive === 'Да').length} активни`, h('button', { class: 'btn', type: 'button', onclick: invite }, icon('plus', 18), 'Поканете')),
+    pageHead('Потребители', `${data.org.name} · ${limitText('maxUsers')} потребители по плана`,
+      h('button', { class: 'btn', type: 'button', disabled: atLimit('maxUsers'), title: atLimit('maxUsers') ? 'Достигнато е ограничението на плана' : null, onclick: invite }, icon('plus', 18), 'Поканете')),
+    atLimit('maxUsers') && h('div', { class: 'alert alert--warn', role: 'status' }, `Планът „${data.plan.name}“ позволява до ${data.plan.maxUsers} потребители. За повече се свържете с БУЛАДМИН.`),
     h('div', { class: 'table-wrap' }, h('table', {},
       h('thead', {}, h('tr', {}, ['Име', 'Имейл', 'Роля', 'Вход', 'Последен вход', ''].map((t) => h('th', { scope: 'col' }, t)))),
       h('tbody', {}, rows.map((u) => h('tr', { class: u.isActive === 'Да' ? '' : 'is-muted' },
-        h('td', { 'data-label': 'Име' }, h('span', { class: `dot ${u.isActive === 'Да' ? (u.pendingSetup && !u.google && !u.microsoft ? 'dot--wait' : 'dot--on') : 'dot--off'}` }), h('strong', {}, u.name), u.jobTitle && h('div', { class: 'small muted' }, u.jobTitle)),
+        h('td', { 'data-label': 'Име' }, h('span', { class: `dot ${u.isActive === 'Да' ? (u.pendingSetup ? 'dot--wait' : 'dot--on') : 'dot--off'}` }), h('strong', {}, u.name), u.jobTitle && h('div', { class: 'small muted' }, u.jobTitle)),
         h('td', { 'data-label': 'Имейл' }, u.email),
-        h('td', { 'data-label': 'Роля' }, u.role, u.isActive !== 'Да' && h('div', { class: 'small text-error' }, 'деактивиран')),
-        h('td', { 'data-label': 'Вход' }, [u.pendingSetup ? null : 'парола', u.google && 'Google', u.microsoft && 'Microsoft'].filter(Boolean).join(', ') || h('span', { class: 'muted' }, 'чака първи вход')),
+        h('td', { 'data-label': 'Роля' }, u.role, u.isActive !== 'Да' && h('div', { class: 'small text-error' }, 'без достъп')),
+        h('td', { 'data-label': 'Вход' }, [u.pendingSetup ? null : u.google || u.microsoft ? null : 'парола', u.google && 'Google', u.microsoft && 'Microsoft'].filter(Boolean).join(', ') || h('span', { class: 'muted' }, 'чака първи вход')),
         h('td', { 'data-label': 'Последен вход' }, u.lastLoginAt ? timeAgo(u.lastLoginAt) : '—'),
         h('td', { class: 'td-actions' }, u.email !== me.user.email && h('div', { class: 'row-tight' },
-          h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: () => edit(u) }, 'Промяна'),
-          u.isActive === 'Да' && h('button', {
-            class: 'btn btn--ghost btn--small', type: 'button',
-            onclick: async () => {
-              const result = await act(() => api(`/admin/users/${encodeURIComponent(u.email)}/reset`, { method: 'POST' }));
-              if (result) { viewUsers(); showDelivery(result, `Линк за парола за ${u.name}:`); }
-            },
-          }, 'Линк за парола'),
+          h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: () => edit(u) }, 'Роля'),
           h('button', {
             class: 'btn btn--ghost btn--small', type: 'button',
             onclick: async () => {
-              if (u.isActive === 'Да' && !(await confirmDialog({ title: 'Деактивиране', text: `${u.name} няма да може да влиза. Отворените сесии спират веднага.`, confirmLabel: 'Деактивирайте', danger: true }))) return;
-              await act(() => api(`/admin/users/${encodeURIComponent(u.email)}`, { method: 'PATCH', body: { isActive: u.isActive !== 'Да' } }), 'Запазено.');
+              if (u.isActive === 'Да' && !(await confirmDialog({ title: 'Спиране на достъпа', text: `${u.name} вече няма да вижда „${data.org.name}“. Профилът и другите му организации остават.`, confirmLabel: 'Спрете', danger: true }))) return;
+              await act(() => api(`/org/members/${encodeURIComponent(u.email)}`, { method: 'PATCH', body: { isActive: u.isActive !== 'Да' } }), 'Запазено.');
               viewUsers();
             },
-          }, u.isActive === 'Да' ? 'Деактивирайте' : 'Активирайте')))))))));
+          }, u.isActive === 'Да' ? 'Спрете достъпа' : 'Върнете достъпа')))))))));
 }
 
-// --- Настройки (администратор) ---
+// --- Настройки на организацията (администратор) ---
+
+function planCard() {
+  return h('section', { class: 'card stack' },
+    h('div', { class: 'row row--between' },
+      h('h2', {}, `План „${data.plan.name}“`),
+      data.org.planUntil && h('span', { class: 'small muted' }, `платен до ${formatDate(data.org.planUntil)}`)),
+    data.plan.description && h('p', { class: 'small muted' }, data.plan.description),
+    h('table', { class: 'usage' },
+      h('tbody', {}, Object.entries(meta.limits).map(([key, { label }]) => {
+        const limit = data.plan[key];
+        const used = data.usage[key];
+        const ratio = limit === '' ? 0 : Math.min(1, used / Math.max(1, limit));
+        return h('tr', {},
+          h('th', { scope: 'row' }, label[0].toUpperCase() + label.slice(1)),
+          h('td', { class: 'num' }, limit === '' ? `${used} · без ограничение` : `${used} от ${limit}`),
+          h('td', { class: 'usage__bar' }, limit !== '' && h('span', { class: `meter ${ratio >= 1 ? 'meter--full' : ratio >= 0.8 ? 'meter--near' : ''}` },
+            h('span', { style: `width:${Math.round(ratio * 100)}%` }))));
+      }),
+      h('tr', {}, h('th', { scope: 'row' }, 'Лого в документите'), h('td', {}, data.plan.allowLogo === 'Да' ? 'включено' : 'не е включено'), h('td', {})))),
+    h('p', { class: 'small muted' }, 'За по-голям план пишете на ', h('a', { href: 'mailto:call@buladmin.eu' }, 'call@buladmin.eu'), '. Плановете се сменят от администраторите на БУЛАДМИН.'));
+}
+
+function logoCard() {
+  const allowed = data.plan.allowLogo === 'Да';
+  const input = h('input', { type: 'file', accept: 'image/png,image/jpeg', id: 'logo-file', class: 'sr-only' });
+  input.addEventListener('change', async () => {
+    const file = input.files[0];
+    if (!file) return;
+    if (!['image/png', 'image/jpeg'].includes(file.type)) { toast('Логото трябва да е PNG или JPG.', 'error'); return; }
+    if (file.size > 300 * 1024) { toast('Логото трябва да е до 300 KB.', 'error'); return; }
+    const ok = await act(() => api('/org/logo', { method: 'PUT', bytes: file, type: file.type }), 'Логото е качено.');
+    if (ok) { logoVersion = Date.now(); logoCache = null; viewSettings(); }
+  });
+  return h('section', { class: `card stack ${allowed ? '' : 'card--muted'}` },
+    h('h2', {}, 'Лого в офертите и фактурите'),
+    allowed
+      ? [
+        data.org.hasLogo
+          ? h('img', { class: 'logo-preview', src: logoSrc(), alt: `Лого на ${data.org.name}` })
+          : h('p', { class: 'small muted' }, 'Още няма лого. PNG или JPG до 300 KB, за предпочитане с прозрачен фон и ширина поне 400 px.'),
+        h('div', { class: 'row' },
+          input, h('label', { for: 'logo-file', class: 'btn btn--ghost' }, icon('download', 18), data.org.hasLogo ? 'Сменете логото' : 'Качете лого'),
+          data.org.hasLogo && h('button', {
+            class: 'btn btn--ghost', type: 'button',
+            onclick: async () => { if (await act(() => api('/org/logo', { method: 'DELETE' }), 'Логото е премахнато.')) { logoCache = null; viewSettings(); } },
+          }, 'Премахнете'))]
+      : h('p', { class: 'small muted' }, `Логото е платена възможност и не е включено в плана „${data.plan.name}“. В документите вместо него стои името на фирмата.`));
+}
 
 function viewSettings() {
   const c = data.company;
@@ -1079,35 +1234,347 @@ function viewSettings() {
     event.preventDefault();
     alert.replaceChildren();
     try {
-      await api('/admin/settings', { method: 'PUT', body: formValues(form) });
+      await api('/org/settings', { method: 'PUT', body: formValues(form) });
       showFieldErrors(form, {});
       await refresh();
+      me = await api('/me');
       toast('Настройките са запазени.');
     } catch (err) {
       showFieldErrors(form, err.fields);
       showError(alert, err.message);
     }
   });
-  page(pageHead('Настройки', 'Данни на фирмата, номерация и срокове.'), h('div', { class: 'narrow' }, form));
+  page(pageHead('Настройки', `${data.org.name}: план, лого, данни на фирмата и номерация.`),
+    h('div', { class: 'split' }, form, h('div', { class: 'stack' }, planCard(), logoCard())));
 }
 
-// --- Маршрути ---
+// --- Регистрация на фирма ---
+
+function companyForm(onCreated) {
+  const alert = h('div', { 'aria-live': 'polite' });
+  const form = h('form', { class: 'form', novalidate: true },
+    h('div', { class: 'form__grid' },
+      field({ name: 'name', label: 'Наименование на фирмата', required: true, maxlength: 120, wrapClass: 'full', placeholder: 'Пример ЕООД' }),
+      field({ name: 'eik', label: 'ЕИК/БУЛСТАТ', required: true, inputmode: 'numeric', maxlength: 13 }),
+      selectField({ name: 'vatRegistered', label: 'Регистрирана по ДДС', options: ['Не', 'Да'], value: 'Не' }),
+      field({ name: 'vatNumber', label: 'ДДС номер', hint: 'ако е регистрирана', placeholder: 'BG123456789', maxlength: 12 }),
+      field({ name: 'mol', label: 'МОЛ', hint: 'по желание', maxlength: 120 }),
+      field({ name: 'city', label: 'Населено място', maxlength: 120 }),
+      field({ name: 'address', label: 'Адрес', maxlength: 255 })),
+    h('p', { class: 'small muted' }, 'Фирмата започва на безплатния план: 1 потребител, до 10 контрагента, 10 фактури и 10 оферти на месец. По-голям план и лого в документите — от администраторите на БУЛАДМИН.'),
+    alert,
+    h('div', {}, h('button', { class: 'btn', type: 'submit' }, 'Регистрирайте фирмата')));
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    alert.replaceChildren();
+    const button = form.querySelector('button[type=submit]');
+    button.disabled = true;
+    try {
+      const org = await api('/orgs', { method: 'POST', body: formValues(form) });
+      await onCreated(org);
+    } catch (err) {
+      showFieldErrors(form, err.fields);
+      showError(alert, err.message);
+      button.disabled = false;
+    }
+  });
+  return form;
+}
+
+function viewNewOrg() {
+  page(
+    pageHead(me.orgs.length ? 'Нова фирма' : `Добре дошли, ${me.user.name}`,
+      me.orgs.length ? 'Регистрирайте още една фирма. Ще можете да превключвате между тях от менюто.' : 'Регистрирайте фирмата си, за да започнете. Ще бъдете неин администратор.'),
+    h('div', { class: 'split' },
+      h('section', { class: 'card' }, companyForm(async (org) => {
+        toast(`„${org.name}“ е регистрирана.`);
+        me = await api('/me');
+        await selectOrg(org.id, '#/settings');
+      })),
+      h('section', { class: 'card card--tint stack' },
+        h('h2', {}, 'Фирмата Ви вече е тук?'),
+        h('p', { class: 'small' }, 'Ако колега вече е регистрирал фирмата, помолете го да Ви покани от „Потребители“ с имейла, с който влизате: ', h('strong', {}, me.user.email), '.'),
+        h('p', { class: 'small muted' }, 'Една фирма (ЕИК) може да се регистрира само веднъж.'))));
+}
+
+// --- БУЛАДМИН: организации, планове, потребители ---
+
+let platform = null;
+async function loadPlatform() {
+  platform = await api('/platform');
+  return platform;
+}
+const planName = (id) => platform.plans.find((p) => p.id === id)?.name || id;
+
+function usageSummary(o) {
+  const plan = platform.plans.find((p) => p.id === o.effectivePlan) || {};
+  return Object.entries(meta.limits).map(([key, { label }]) => `${label}: ${o.usage[key]}${plan[key] === '' || plan[key] === undefined ? '' : `/${plan[key]}`}`).join(' · ');
+}
+
+async function viewPlatformOrgs(query) {
+  await loadPlatform();
+  const q = norm(query.get('q') || '');
+  const status = query.get('status') || '';
+  const rows = platform.orgs
+    .filter((o) => (!status || o.status === status || (status === 'paid' && o.effectivePlan !== platform.plans.find((p) => p.isDefault === 'Да')?.id)))
+    .filter((o) => !q || norm(`${o.name} ${o.eik} ${o.members.map((m) => m.email).join(' ')}`).includes(q))
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  const search = h('input', { type: 'search', value: query.get('q') || '', placeholder: 'Име, ЕИК или имейл', 'aria-label': 'Търсене' });
+  search.addEventListener('change', () => { location.hash = `#/platform?q=${encodeURIComponent(search.value)}&status=${encodeURIComponent(status)}`; });
+  page(
+    pageHead('Организации', `${platform.orgs.length} регистрирани · ${platform.orgs.filter((o) => o.status === 'Спряна').length} спрени`),
+    h('div', { class: 'toolbar' },
+      h('label', { class: 'search' }, icon('search', 18), search),
+      chips([['', 'Всички'], ['Активна', 'Активни'], ['Спряна', 'Спрени'], ['paid', 'На платен план']], status,
+        (v) => { location.hash = `#/platform?q=${encodeURIComponent(search.value)}&status=${encodeURIComponent(v)}`; })),
+    rows.length ? h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Организация', 'ЕИК', 'План', 'Администратори', 'Използване този месец', 'Регистрирана'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', {}, rows.map((o) => {
+        const href = `#/platform/orgs/${o.id}`;
+        const tr = h('tr', { 'data-href': href, class: o.status === 'Спряна' ? 'is-muted' : '' },
+          h('td', { 'data-label': 'Организация' }, h('a', { href }, o.name), o.status === 'Спряна' && h('div', { class: 'small text-error' }, 'спряна')),
+          h('td', { 'data-label': 'ЕИК' }, o.eik),
+          h('td', { 'data-label': 'План' }, planName(o.effectivePlan), o.planUntil && h('div', { class: 'small muted' }, `до ${formatDate(o.planUntil)}`)),
+          h('td', { 'data-label': 'Администратори' }, o.members.filter((m) => m.role === 'Администратор' && m.isActive === 'Да').map((m) => m.email).join(', ')),
+          h('td', { 'data-label': 'Използване', class: 'small' }, `фактури ${o.usage.maxInvoices}, оферти ${o.usage.maxOffers}, контрагенти ${o.usage.maxCompanies}, хора ${o.usage.maxUsers}`),
+          h('td', { 'data-label': 'Регистрирана', class: 'nowrap' }, formatDate(o.createdAt)));
+        tr.addEventListener('click', (event) => { if (!event.target.closest('a')) location.hash = href; });
+        return tr;
+      })))) : emptyState('building', 'Няма организации'));
+}
+
+async function viewPlatformOrg(id) {
+  await loadPlatform();
+  const o = platform.orgs.find((x) => x.id === id);
+  if (!o) { page(emptyState('alert', 'Организацията не е намерена')); return; }
+  const alert = h('div', { 'aria-live': 'polite' });
+  const form = h('form', { class: 'form', novalidate: true },
+    h('div', { class: 'form__grid' },
+      selectField({ name: 'planId', label: 'План', options: platform.plans.map((p) => [p.id, `${p.name}${p.isActive === 'Да' ? '' : ' (не се предлага)'}`]), value: o.planId }),
+      field({ name: 'planUntil', label: 'Платен до', type: 'date', value: o.planUntil, hint: 'празно = без край' }),
+      selectField({ name: 'status', label: 'Статус', options: ['Активна', 'Спряна'], value: o.status }),
+      h('div', { class: 'field full' }, h('label', { for: 'f-adminNotes' }, 'Бележки на БУЛАДМИН', h('span', { class: 'field__hint' }, ' (виждат ги само администраторите на БУЛАДМИН)')),
+        h('textarea', { id: 'f-adminNotes', name: 'adminNotes', rows: 3, maxlength: 8000 }, o.adminNotes))),
+    h('p', { class: 'small muted' }, 'След датата „Платен до“ организацията минава автоматично на плана по подразбиране. Спряната организация не е достъпна за хората в нея.'),
+    alert,
+    h('div', {}, h('button', { class: 'btn', type: 'submit' }, 'Запазете')));
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    try {
+      await api(`/platform/orgs/${id}`, { method: 'PATCH', body: formValues(form) });
+      toast('Запазено.');
+      if (id === orgId) await refresh();
+      viewPlatformOrg(id);
+    } catch (err) {
+      showFieldErrors(form, err.fields);
+      showError(alert, err.message);
+    }
+  });
+  const addMember = async () => {
+    const result = await formDialog({
+      title: `Добавете човек в ${o.name}`,
+      fields: [field({ name: 'email', label: 'Имейл', type: 'email', required: true }), field({ name: 'fullName', label: 'Име', hint: 'ако още няма профил' }),
+        selectField({ name: 'role', label: 'Роля', options: meta.roles, value: 'Администратор' }),
+        h('p', { class: 'small muted' }, 'Ограничението на плана за брой потребители не важи, когато добавя БУЛАДМИН.')],
+      submitLabel: 'Добавете',
+      onSubmit: (body) => api(`/platform/orgs/${id}/members`, { method: 'POST', body }),
+    });
+    if (result) { await viewPlatformOrg(id); showDelivery(result, 'Изпратете този линк на човека лично:'); }
+  };
+  page(
+    h('div', { id: 'delivery' }),
+    h('a', { class: 'back', href: '#/platform' }, icon('back', 16), 'Организации'),
+    pageHead(o.name, `ЕИК ${o.eik} · регистрирана ${formatDate(o.createdAt)} от ${o.createdBy}`,
+      h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => selectOrg(o.id) }, icon('arrow', 18), 'Влезте като администратор')),
+    h('div', { class: 'split' },
+      h('div', { class: 'stack' },
+        h('section', { class: 'card' }, h('h2', { class: 'card__title' }, 'План и статус'), form),
+        h('section', { class: 'card card--list' },
+          h('div', { class: 'card__head' }, h('h2', {}, `Хора (${o.members.length})`), h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: addMember }, icon('plus', 16), 'Добавете')),
+          h('div', { class: 'table-wrap' }, h('table', {}, h('tbody', {}, o.members.map((m) => h('tr', { class: m.isActive === 'Да' ? '' : 'is-muted' },
+            h('td', {}, h('strong', {}, m.name), h('div', { class: 'small muted' }, m.email)),
+            h('td', {}, h('select', {
+              'aria-label': `Роля на ${m.name}`,
+              onchange: (e) => act(() => api(`/platform/orgs/${id}/members/${encodeURIComponent(m.email)}`, { method: 'PATCH', body: { role: e.target.value } }), 'Ролята е сменена.'),
+            }, meta.roles.map((r) => h('option', { value: r, selected: r === m.role }, r)))),
+            h('td', { class: 'td-actions' }, h('button', {
+              class: 'btn btn--ghost btn--small', type: 'button',
+              onclick: async () => { await act(() => api(`/platform/orgs/${id}/members/${encodeURIComponent(m.email)}`, { method: 'PATCH', body: { isActive: m.isActive !== 'Да' } }), 'Запазено.'); viewPlatformOrg(id); },
+            }, m.isActive === 'Да' ? 'Спрете достъпа' : 'Върнете достъпа'))))))))),
+      h('div', { class: 'stack' },
+        h('section', { class: 'card stack-tight' },
+          h('h2', { class: 'card__title' }, 'Използване'),
+          h('p', { class: 'small' }, usageSummary(o)),
+          h('p', { class: 'small muted' }, `Лого: ${o.hasLogo ? 'качено' : 'няма'}`)),
+        h('section', { class: 'card' }, h('h2', { class: 'card__title' }, 'Данни на фирмата'),
+          h('dl', { class: 'details details--stacked' },
+            [['ДДС', o.vatRegistered === 'Да' ? o.vatNumber : 'не е регистрирана'], ['МОЛ', o.mol], ['Адрес', [o.city, o.address].filter(Boolean).join(', ')], ['Телефон', o.phone], ['Имейл', o.email]]
+              .filter(([, v]) => v).flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]))),
+        await historyCardFor('orgs', id))));
+}
+
+// Историята на организация се вижда от БУЛАДМИН, затова се чете в контекста на самата организация.
+async function historyCardFor(entity, id) {
+  const box = h('section', { class: 'card stack-tight' }, h('h2', { class: 'card__title' }, 'История'));
+  const saved = orgId;
+  try {
+    setOrg(id);
+    const events = await api(`/history/${entity}/${encodeURIComponent(id)}`);
+    box.append(events.length ? h('ol', { class: 'timeline' }, events.slice(0, 20).map((e) => h('li', {},
+      h('div', { class: 'timeline__head' }, h('strong', {}, e.action), h('span', {}, `${e.actorName} · ${formatTime(e.occurredAt)}`)),
+      e.summary && h('p', { class: 'timeline__msg small' }, e.summary)))) : h('p', { class: 'small muted' }, 'Няма записи.'));
+  } catch {
+    box.append(h('p', { class: 'small muted' }, 'Историята не може да се зареди.'));
+  } finally {
+    setOrg(saved);
+  }
+  return box;
+}
+
+async function viewPlatformPlans() {
+  await loadPlatform();
+  const edit = async (plan) => {
+    const isNew = !plan;
+    const p = plan || { id: '', name: '', description: '', price: '', allowLogo: 'Да', isDefault: 'Не', isActive: 'Да', sortOrder: platform.plans.length + 1 };
+    const result = await formDialog({
+      title: isNew ? 'Нов план' : `План „${p.name}“`,
+      wide: true,
+      fields: [
+        h('div', { class: 'form__grid' },
+          field({ name: 'id', label: 'Код', value: p.id, hint: 'латиница, напр. standard', maxlength: 30 }),
+          field({ name: 'name', label: 'Име', value: p.name, maxlength: 80 }),
+          h('div', { class: 'field full' }, h('label', { for: 'f-description' }, 'Описание'), h('textarea', { id: 'f-description', name: 'description', rows: 2, maxlength: 1000 }, p.description || '')),
+          field({ name: 'price', label: 'Цена на месец (EUR)', value: p.price === '' ? '' : String(p.price), inputmode: 'decimal', hint: 'за сведение' }),
+          field({ name: 'sortOrder', label: 'Подредба', value: String(p.sortOrder ?? ''), inputmode: 'numeric' }),
+          ...Object.entries(meta.limits).map(([key, { label }]) => field({ name: key, label: label[0].toUpperCase() + label.slice(1), value: p[key] === '' ? '' : String(p[key] ?? ''), inputmode: 'numeric', hint: 'празно = без ограничение' })),
+          selectField({ name: 'allowLogo', label: 'Лого в документите', options: ['Да', 'Не'], value: p.allowLogo }),
+          selectField({ name: 'isActive', label: 'Предлага се', options: ['Да', 'Не'], value: p.isActive }),
+          selectField({ name: 'isDefault', label: 'План при регистрация', options: ['Не', 'Да'], value: p.isDefault })),
+      ],
+      onSubmit: (body) => {
+        const code = (isNew ? body.id : p.id).trim();
+        return api(`/platform/plans/${encodeURIComponent(code)}`, { method: 'PUT', body });
+      },
+    });
+    if (result) { toast('Планът е запазен.'); if (orgId) await refresh(); viewPlatformPlans(); }
+  };
+  const count = (id) => platform.orgs.filter((o) => o.effectivePlan === id && o.status === 'Активна').length;
+  page(
+    pageHead('Планове', 'Ограниченията важат веднага за всички организации на съответния план. Празно поле = без ограничение.',
+      h('button', { class: 'btn', type: 'button', onclick: () => edit(null) }, icon('plus', 18), 'Нов план')),
+    h('div', { class: 'plan-grid' }, platform.plans.map((p) => h('section', { class: `card stack-tight plan ${p.isActive === 'Да' ? '' : 'card--muted'}` },
+      h('div', { class: 'row row--between' }, h('h2', {}, p.name), p.isDefault === 'Да' && h('span', { class: 'tag' }, 'при регистрация')),
+      h('p', { class: 'small muted' }, `${p.id} · ${p.price === '' ? 'цена не е зададена' : money(p.price)} на месец · ${count(p.id)} активни организации`),
+      p.description && h('p', { class: 'small' }, p.description),
+      h('dl', { class: 'details' }, Object.entries(meta.limits).flatMap(([key, { label }]) => [h('dt', {}, label), h('dd', {}, p[key] === '' ? 'без ограничение' : String(p[key]))]),
+        h('dt', {}, 'лого'), h('dd', {}, p.allowLogo === 'Да' ? 'да' : 'не')),
+      h('div', {}, h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: () => edit(p) }, icon('edit', 16), 'Промяна'))))));
+}
+
+async function viewPlatformUsers(query) {
+  await loadPlatform();
+  const q = norm(query.get('q') || '');
+  const orgName = (id) => platform.orgs.find((o) => o.id === id)?.name || id;
+  const rows = platform.users.filter((u) => !q || norm(`${u.name} ${u.email}`).includes(q))
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  const search = h('input', { type: 'search', value: query.get('q') || '', placeholder: 'Име или имейл', 'aria-label': 'Търсене' });
+  search.addEventListener('change', () => { location.hash = `#/platform/users?q=${encodeURIComponent(search.value)}`; });
+  page(
+    h('div', { id: 'delivery' }),
+    pageHead('Всички потребители', `${platform.users.length} профила · ${platform.users.filter((u) => u.platformRole).length} администратори на БУЛАДМИН`),
+    h('label', { class: 'search' }, icon('search', 18), search),
+    h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Име', 'Организации', 'Вход', 'Регистриран', ''].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', {}, rows.map((u) => h('tr', { class: u.isActive === 'Да' ? '' : 'is-muted' },
+        h('td', { 'data-label': 'Име' }, h('strong', {}, u.name), h('div', { class: 'small muted' }, u.email),
+          u.platformRole && h('span', { class: 'tag' }, 'БУЛАДМИН'), !u.emailVerified && h('div', { class: 'small text-error' }, 'непотвърден имейл')),
+        h('td', { 'data-label': 'Организации' }, u.orgs.map((id) => h('a', { href: `#/platform/orgs/${id}`, class: 'tag' }, orgName(id)))),
+        h('td', { 'data-label': 'Вход' }, [u.pendingSetup ? 'чака първи вход' : null, u.google && 'Google', u.microsoft && 'Microsoft'].filter(Boolean).join(', ') || 'парола',
+          u.lastLoginAt && h('div', { class: 'small muted' }, timeAgo(u.lastLoginAt))),
+        h('td', { 'data-label': 'Регистриран', class: 'nowrap' }, formatDate(u.createdAt)),
+        h('td', { class: 'td-actions' }, u.email !== me.user.email && h('div', { class: 'row-tight' },
+          h('button', {
+            class: 'btn btn--ghost btn--small', type: 'button',
+            onclick: async () => {
+              const result = await act(() => api(`/platform/users/${encodeURIComponent(u.email)}/reset`, { method: 'POST' }));
+              if (result) { await viewPlatformUsers(query); showDelivery(result, `Линк за парола за ${u.name}:`); }
+            },
+          }, 'Линк за парола'),
+          h('button', {
+            class: 'btn btn--ghost btn--small', type: 'button',
+            onclick: async () => {
+              const making = !u.platformRole;
+              if (!(await confirmDialog({ title: making ? 'Администратор на БУЛАДМИН' : 'Премахване на правата', text: making ? `${u.name} ще управлява всички организации, планове и потребители.` : `${u.name} вече няма да е администратор на БУЛАДМИН.`, confirmLabel: 'Потвърдете', danger: !making }))) return;
+              await act(() => api(`/platform/users/${encodeURIComponent(u.email)}`, { method: 'PATCH', body: { platformRole: making } }), 'Запазено.');
+              viewPlatformUsers(query);
+            },
+          }, u.platformRole ? 'Махнете БУЛАДМИН' : 'Направете БУЛАДМИН'),
+          h('button', {
+            class: 'btn btn--ghost btn--small', type: 'button',
+            onclick: async () => {
+              if (u.isActive === 'Да' && !(await confirmDialog({ title: 'Блокиране на профила', text: `${u.name} няма да може да влиза в нито една организация.`, confirmLabel: 'Блокирайте', danger: true }))) return;
+              await act(() => api(`/platform/users/${encodeURIComponent(u.email)}`, { method: 'PATCH', body: { isActive: u.isActive !== 'Да' } }), 'Запазено.');
+              viewPlatformUsers(query);
+            },
+          }, u.isActive === 'Да' ? 'Блокирайте' : 'Отблокирайте')))))))));
+}
+
+// --- Избор на организация и маршрути ---
+
+let orgError = '';
+async function selectOrg(id, hash = '#/') {
+  orgId = id || '';
+  setOrg(orgId);
+  try { localStorage.setItem(ORG_KEY, orgId); } catch { /* изборът важи до презареждане */ }
+  logoCache = null;
+  logoVersion = Date.now();
+  orgError = '';
+  try {
+    await refresh();
+  } catch (err) {
+    data = null;
+    orgError = err.message;
+    syncBadges();
+  }
+  mount();
+  go(hash);
+}
+
+function switcher() {
+  if (!me.orgs.length && !isPlatform()) return null;
+  const select = h('select', { id: 'org-switch', class: 'org-switch__select', 'aria-label': 'Организация' },
+    !me.orgs.some((o) => o.id === orgId) && h('option', { value: orgId, selected: true }, data?.org.name || (orgId ? 'Организация' : 'Изберете организация')),
+    me.orgs.map((o) => h('option', { value: o.id, selected: o.id === orgId }, o.name)),
+    h('option', { value: '__new' }, '+ Нова фирма'));
+  select.addEventListener('change', () => {
+    if (select.value === '__new') {
+      select.value = orgId;
+      location.hash = '#/new-org';
+    } else selectOrg(select.value);
+  });
+  return h('div', { class: 'org-switch' }, select);
+}
 
 function nav() {
   return [
-    { key: 'home', href: '#/', label: 'Табло', icon: 'home', match: /^\/$/ },
-    { group: 'CRM' },
-    { key: 'companies', href: '#/companies', label: 'Контрагенти', icon: 'building', match: /^\/companies/ },
-    { key: 'deals', href: '#/deals', label: 'Сделки', icon: 'handshake', match: /^\/deals/ },
-    { key: 'activities', href: '#/activities', label: 'Задачи', icon: 'check', match: /^\/activities/ },
-    { key: 'contacts', href: '#/contacts', label: 'Лица за контакт', icon: 'users', match: /^\/contacts/ },
-    { group: 'ERP' },
-    { key: 'documents', href: '#/documents', label: 'Оферти и фактури', icon: 'doc', match: /^\/documents/ },
-    { key: 'payments', href: '#/payments', label: 'Плащания', icon: 'wallet', match: /^\/payments/ },
-    { key: 'products', href: '#/products', label: 'Артикули', icon: 'box', match: /^\/products/ },
-    isAdmin() && { group: 'Администрация' },
+    data && { key: 'home', href: '#/', label: 'Табло', icon: 'home', match: /^\/$/ },
+    data && { group: 'CRM' },
+    data && { key: 'companies', href: '#/companies', label: 'Контрагенти', icon: 'building', match: /^\/companies/ },
+    data && { key: 'deals', href: '#/deals', label: 'Сделки', icon: 'handshake', match: /^\/deals/ },
+    data && { key: 'activities', href: '#/activities', label: 'Задачи', icon: 'check', match: /^\/activities/ },
+    data && { key: 'contacts', href: '#/contacts', label: 'Лица за контакт', icon: 'users', match: /^\/contacts/ },
+    data && { group: 'ERP' },
+    data && { key: 'documents', href: '#/documents', label: 'Оферти и фактури', icon: 'doc', match: /^\/documents/ },
+    data && { key: 'payments', href: '#/payments', label: 'Плащания', icon: 'wallet', match: /^\/payments/ },
+    data && { key: 'products', href: '#/products', label: 'Артикули', icon: 'box', match: /^\/products/ },
+    isAdmin() && { group: 'Организация' },
     isAdmin() && { key: 'users', href: '#/users', label: 'Потребители', icon: 'team', match: /^\/users/ },
-    isAdmin() && { key: 'settings', href: '#/settings', label: 'Настройки', icon: 'settings', match: /^\/settings/ },
+    isAdmin() && { key: 'settings', href: '#/settings', label: 'Настройки и план', icon: 'settings', match: /^\/settings/ },
+    isPlatform() && { group: 'БУЛАДМИН' },
+    isPlatform() && { key: 'p-orgs', href: '#/platform', label: 'Организации', icon: 'building', match: /^\/platform(\/orgs.*)?$/ },
+    isPlatform() && { key: 'p-plans', href: '#/platform/plans', label: 'Планове', icon: 'chart', match: /^\/platform\/plans/ },
+    isPlatform() && { key: 'p-users', href: '#/platform/users', label: 'Всички потребители', icon: 'team', match: /^\/platform\/users/ },
+    !data && !me.orgs.length && { key: 'new-org', href: '#/new-org', label: 'Регистрация на фирма', icon: 'plus', match: /^\/new-org/ },
     { key: 'me', href: '#/me', label: 'Профил', icon: 'user', match: /^\/me/ },
   ].filter(Boolean);
 }
@@ -1116,15 +1583,27 @@ async function route() {
   const [path, qs = ''] = location.hash.replace(/^#/, '').split('?');
   const query = new URLSearchParams(qs);
   const parts = (path || '/').split('/').filter(Boolean).map(decodeURIComponent);
-  const [section, id] = parts;
-  document.title = 'BulAdmin CRM / ERP';
+  const [section, id, sub] = parts;
+  document.title = data ? `${data.org.name} | BulAdmin CRM / ERP` : 'BulAdmin CRM / ERP';
   try {
+    if (section === 'me') return viewMe();
+    if (section === 'new-org') return viewNewOrg();
+    if (section === 'platform' && isPlatform()) {
+      if (!id) return await viewPlatformOrgs(query);
+      if (id === 'orgs' && sub) return await viewPlatformOrg(sub);
+      if (id === 'plans') return await viewPlatformPlans();
+      if (id === 'users') return await viewPlatformUsers(query);
+    }
+    if (!data) {
+      if (orgError) return page(emptyState('alert', 'Няма достъп до организацията', orgError, h('a', { class: 'btn', href: '#/me' }, 'Към профила')));
+      if (isPlatform() && !section) return await viewPlatformOrgs(query);
+      return viewNewOrg();
+    }
     if (!section) return viewDashboard();
     if (section === 'documents') return id ? await viewDocument(id, query) : viewDocuments(query);
     if (section === 'payments') return viewPayments();
     if (section === 'deals' && !id) return viewDeals(query);
     if (section === 'activities' && !id) return viewActivities();
-    if (section === 'me') return viewMe();
     if (section === 'users' && isAdmin()) return viewUsers();
     if (section === 'settings' && isAdmin()) return viewSettings();
     if (meta.entities[section]?.generic) return id ? await viewRecord(section, id) : viewList(section, query);
@@ -1134,6 +1613,38 @@ async function route() {
   }
 }
 
+function mount() {
+  shell = mountShell({
+    user: me.user.name,
+    detail: data ? `${data.role}${data.viaPlatform ? ' (БУЛАДМИН)' : ''}` : (isPlatform() ? 'БУЛАДМИН' : ''),
+    nav,
+    switcher: switcher(),
+  });
+  main = shell.main;
+  syncBadges();
+}
+
+// Профил с непотвърден имейл вижда само молба да го потвърди.
+function verifyScreen() {
+  const alert = h('div', { 'aria-live': 'polite' });
+  document.body.replaceChildren(h('main', { id: 'main' }, h('div', { class: 'wrap wrap--narrow section' },
+    h('section', { class: 'card stack' },
+      h('h1', {}, 'Потвърдете имейла си'),
+      h('p', {}, 'Изпратихме линк на ', h('strong', {}, me.user.email), '. Отворете го, за да започнете работа. Проверете и папката за нежелана поща.'),
+      alert,
+      h('div', { class: 'row' },
+        h('button', {
+          class: 'btn', type: 'button',
+          onclick: async () => {
+            try {
+              await api('/auth/resend-verification', { method: 'POST' });
+              alert.replaceChildren(h('div', { class: 'alert alert--ok', role: 'status' }, 'Изпратихме нов линк.'));
+            } catch (err) { showError(alert, err.message); }
+          },
+        }, 'Изпратете нов линк'),
+        h('button', { class: 'btn btn--ghost', type: 'button', onclick: async () => { await api('/auth/logout', { method: 'POST' }).catch(() => {}); location.href = '/'; } }, 'Изход'))))));
+}
+
 async function init() {
   try {
     me = await api('/me');
@@ -1141,21 +1652,35 @@ async function init() {
       location.replace('/');
       return;
     }
-    [meta, data] = await Promise.all([api('/meta'), api('/data')]);
+    if (me.needsEmailVerification) {
+      verifyScreen();
+      return;
+    }
+    meta = await api('/meta');
   } catch (err) {
     fatal(document.body, err);
     return;
   }
-  shell = mountShell({ user: me.user.name, detail: me.user.role, nav });
-  main = shell.main;
-  syncBadges();
+  let stored = '';
+  try { stored = localStorage.getItem(ORG_KEY) || ''; } catch { /* без запомнен избор */ }
+  const initial = me.orgs.find((o) => o.id === stored)?.id || (isPlatform() && stored) || me.orgs[0]?.id || '';
+  orgId = initial;
+  setOrg(orgId);
+  try {
+    data = orgId ? await api('/data') : null;
+  } catch (err) {
+    if (err.status === 401) { location.replace('/'); return; }
+    data = null;
+    orgError = err.message;
+  }
+  mount();
   window.addEventListener('hashchange', () => { loading(); route(); });
   // Данните се опресняват, когато потребителят се върне в раздела.
   document.addEventListener('visibilitychange', async () => {
-    if (document.hidden || document.querySelector('dialog[open]') || document.activeElement?.matches('input, textarea, select')) return;
+    if (document.hidden || !data || document.querySelector('dialog[open]') || document.activeElement?.matches('input, textarea, select')) return;
     try {
       await refresh();
-      if (!location.hash.startsWith('#/documents/') && !location.hash.startsWith('#/settings') && !location.hash.startsWith('#/me')) route();
+      if (!/^#\/(documents\/|settings|me|platform|new-org)/.test(location.hash)) route();
     } catch (err) {
       if (err.status === 401) location.replace('/');
     }

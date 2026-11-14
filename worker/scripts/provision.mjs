@@ -6,6 +6,7 @@
 // Чете частния ключ на сертификата от worker/.dev.vars.
 import { readFileSync } from 'node:fs';
 import { b64url, CLIENT_ASSERTION_TYPE, clientAssertion, sha256 } from '../src/crypto.js';
+import { DEFAULT_PLANS } from '../src/plans.js';
 import schema from '../src/schema.json' with { type: 'json' };
 
 const vars = Object.fromEntries(
@@ -97,14 +98,32 @@ for (const [key, def] of Object.entries(schema)) {
   }
 }
 
+// Плановете по подразбиране, ако таблицата е празна. След това се променят от системата („БУЛАДМИН“ → „Планове“).
+const { value: planItems } = await graph(`/sites/${site.id}/lists/${listIds.plans}/items?$top=1`);
+if (!planItems.length) {
+  for (const { id, ...plan } of DEFAULT_PLANS) {
+    const fields = { Title: id };
+    for (const [key, value] of Object.entries(plan)) if (value !== '') fields[key] = value;
+    await graph(`/sites/${site.id}/lists/${listIds.plans}/items`, 'POST', { fields });
+  }
+  console.log(`  създадени планове: ${DEFAULT_PLANS.map((p) => p.name).join(', ')}`);
+}
+
+const PLATFORM_ADMIN = 'Администратор на БУЛАДМИН';
 const admin = arg('--admin');
 if (admin) {
   const email = admin.toLowerCase();
   const { value } = await graph(`/sites/${site.id}/lists/${listIds.users}/items?expand=fields`);
-  if (value.some((item) => item.fields.Title?.toLowerCase() === email)) {
-    console.log(`  потребителят вече е вписан: ${email}`);
+  const existing = value.find((item) => item.fields.Title?.toLowerCase() === email);
+  if (existing) {
+    if (existing.fields.platformRole !== PLATFORM_ADMIN) {
+      await graph(`/sites/${site.id}/lists/${listIds.users}/items/${existing.id}/fields`, 'PATCH', { platformRole: PLATFORM_ADMIN });
+      console.log(`  ${email} вече е администратор на БУЛАДМИН`);
+    } else {
+      console.log(`  потребителят вече е вписан: ${email}`);
+    }
   } else {
-    // Първият потребител е администратор. Влиза с Google или Microsoft с този имейл
+    // Първият потребител е администратор на БУЛАДМИН. Влиза с Google или Microsoft с този имейл
     // или задава парола през еднократен линк, валиден 72 часа.
     const token = `u.${b64url(crypto.getRandomValues(new Uint8Array(32)))}`;
     await graph(`/sites/${site.id}/lists/${listIds.users}/items`, 'POST', {
@@ -112,7 +131,7 @@ if (admin) {
         Title: email,
         fullName: arg('--name') || email,
         isActive: 'Да',
-        role: 'Администратор',
+        platformRole: PLATFORM_ADMIN,
         sessionVersion: '0',
         failedLogins: '0',
         resetTokenHash: b64url(await sha256(token)),

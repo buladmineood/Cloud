@@ -46,7 +46,7 @@ const doc = (id, docType, number, docStatus, companyId, days, extra = {}) => ({
   issuedAt: docStatus === 'Чернова' ? '' : at(days), ...stamp(days), ...extra,
 });
 
-const store = new MemoryStore({
+const seed = {
   users: [
     { id: 'admin@buladmin.eu', fullName: 'Демо Администратор', role: 'Администратор', isActive: 'Да', jobTitle: 'Управител', sessionVersion: '0', createdAt: at(60) },
     { id: 'sales@buladmin.eu', fullName: 'Демо Търговец', role: 'Потребител', isActive: 'Да', jobTitle: 'Търговски представител', sessionVersion: '0', createdAt: at(40) },
@@ -92,13 +92,33 @@ const store = new MemoryStore({
   payments: [
     { id: 'PAY-DEMO0001', documentId: 'DOC-DEMO0001', companyId: 'CO-DEMO0001', paidAt: day(-20), amount: totals.total, method: 'Банков превод', reference: 'Плащане по ф-ра 1', createdBy: 'admin@buladmin.eu', createdAt: at(20) },
   ],
-});
+};
+
+// Всички демо записи са на първата фирма. Втората е на безплатния план, за да се вижда превключването и ограниченията.
+const ORG = 'ORG-DEMO0001';
+for (const table of ['companies', 'contacts', 'deals', 'activities', 'products', 'documents', 'payments']) {
+  for (const row of seed[table]) row.orgId = ORG;
+}
+delete seed.settings;
+seed.users = seed.users.map(({ role, ...u }) => u);
+seed.users[0].platformRole = 'Администратор на БУЛАДМИН';
+seed.orgs = [
+  { id: ORG, ...company, planId: 'standard', orgStatus: 'Активна', createdBy: 'admin@buladmin.eu', createdAt: at(60), updatedAt: at(60) },
+  { id: 'ORG-DEMO0002', ...company, name: 'Втора фирма ЕООД', eik: '202020204', vatRegistered: 'Не', vatNumber: '', planId: 'free', orgStatus: 'Активна', createdBy: 'admin@buladmin.eu', createdAt: at(5), updatedAt: at(5) },
+];
+const member = (orgId, userId, role) => ({ id: `${orgId}:${userId}`, orgId, userId, role, isActive: 'Да', createdAt: at(30) });
+seed.members = [
+  member(ORG, 'admin@buladmin.eu', 'Администратор'), member(ORG, 'sales@buladmin.eu', 'Потребител'),
+  member(ORG, 'viewer@buladmin.eu', 'Наблюдател'), member(ORG, 'nov@buladmin.eu', 'Потребител'),
+  member('ORG-DEMO0002', 'admin@buladmin.eu', 'Администратор'),
+];
+const store = new MemoryStore(seed);
 const app = createApp({ env, store });
 
 const devUsers = { admin: 'admin@buladmin.eu', user: 'sales@buladmin.eu', viewer: 'viewer@buladmin.eu' };
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.webp': 'image/webp',
-  '.png': 'image/png', '.woff2': 'font/woff2', '.svg': 'image/svg+xml', '.json': 'application/json', '.txt': 'text/plain',
+  '.png': 'image/png', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.svg': 'image/svg+xml', '.json': 'application/json', '.txt': 'text/plain',
 };
 
 createServer(async (req, res) => {

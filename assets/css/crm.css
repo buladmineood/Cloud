@@ -133,3 +133,38 @@ tr.is-muted td { opacity: .6; }
   .doc-print__parties { grid-template-columns: 1fr 1fr; }
   @page { margin: 14mm; }
 }
+
+/* Избор на организация */
+.org-switch { padding-inline: 4px; }
+.org-switch__select {
+  width: 100%; min-height: 40px; padding: 6px 10px; border: 1px solid rgb(255 255 255 / .25); border-radius: 9px;
+  background: rgb(255 255 255 / .08); color: #fff; font: inherit; font-size: .9rem; font-weight: 600;
+}
+.org-switch__select option { color: #10294c; background: #fff; }
+.org-switch__select--top { display: none; }
+@media (max-width: 860px) {
+  .org-switch__select--top { display: block; flex: 1; min-width: 0; max-width: 220px; min-height: 36px; }
+}
+
+/* План и използване */
+.usage { width: 100%; font-size: .9rem; }
+.usage th { background: none; padding: 6px 8px 6px 0; font-size: .88rem; font-weight: 500; color: var(--ink); white-space: normal; }
+.usage td { padding: 6px 0 6px 8px; border-top: 0; }
+.usage tr + tr th, .usage tr + tr td { border-top: 1px solid var(--line); }
+.usage__bar { width: 34%; }
+.meter { display: block; height: 6px; border-radius: 99px; background: var(--tint); overflow: hidden; }
+.meter span { display: block; height: 100%; background: var(--ok); }
+.meter--near span { background: var(--gold); }
+.meter--full span { background: var(--error); }
+@media (max-width: 800px) { .usage thead { display: none; } .usage tr { display: table-row; padding: 0; } .usage th, .usage td { display: table-cell; } }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; align-items: start; }
+.plan h2 { font-size: 1.15rem; }
+.logo-preview { max-width: 240px; max-height: 90px; object-fit: contain; padding: 8px; border: 1px dashed var(--line); border-radius: 8px; background: #fff; }
+td .tag { display: inline-block; margin: 2px 4px 2px 0; text-decoration: none; }
+
+/* Документ: лого и ред за системата */
+.doc-print__logo { max-width: 200px; max-height: 64px; object-fit: contain; justify-self: start; }
+.doc-print__made { padding-top: 10px; border-top: 1px solid var(--line); font-size: .78rem; color: var(--ink-2); }
+.plan .details { grid-template-columns: minmax(0, 1fr) auto; }
+.plan .details dd { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.usage td.num { white-space: nowrap; }

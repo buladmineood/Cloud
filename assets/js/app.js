@@ -1,8 +1,8 @@
 import {
   api, confirmDialog, downloadCsv, emptyState, fatal, field, formatDate, formatTime, formDialog, formValues, h, icon, linkBox,
   money, mountShell, norm, num, pageHead, parseNum, pill, round2, selectField, setOrg, showError, showFieldErrors, timeAgo, toast, today,
-} from './core.js?v=300b380863';
-import { buildPdf, saveFile } from './pdf.js?v=300b380863';
+} from './core.js?v=8fdd9a957d';
+import { buildPdf, saveFile } from './pdf.js?v=8fdd9a957d';
 
 let shell;
 let main;
@@ -380,6 +380,7 @@ function viewList(entity, query) {
         class: 'btn btn--ghost', type: 'button',
         onclick: () => downloadCsv(`${entity}-${today()}.csv`, def.columns.map((c) => c.label), filtered().map((r) => def.columns.map((c) => plainValue(c, r)))),
       }, icon('download', 18), 'CSV'),
+      entity === 'tenders' && h('a', { class: 'btn btn--ghost', href: '#/tenders/eop' }, icon('search', 18), 'Обявления в ЦАИС ЕОП'),
       canEdit() && h('button', { class: 'btn', type: 'button', onclick: async () => { const r = await editRecord(entity); if (r) location.hash = `#/${entity}/${r.id}`; } }, icon('plus', 18), 'Нов запис')),
     h('div', { class: 'toolbar' },
       search.el,
@@ -1614,6 +1615,106 @@ async function viewNewOrg() {
         h('p', { class: 'small' }, 'Ако колега вече е регистрирал фирмата, помолете го да Ви покани от „Потребители“ с имейла, с който влизате: ', h('strong', {}, me.user.email), '. Поканата е безплатна и не изисква абонамент.'),
         h('p', { class: 'small muted' }, 'Една фирма (ЕИК) може да се регистрира само веднъж.'))));
 }
+
+// --- Обявления от ЦАИС ЕОП (отворени данни на АОП в data.egov.bg) ---
+
+async function viewEopNotices(query) {
+  const params = new URLSearchParams();
+  for (const key of ['q', 'cpv', 'category', 'region', 'minValue', 'page']) if (query.get(key)) params.set(key, query.get(key));
+  const res = await api(`/eop/notices?${params}`);
+  const go2 = (patch) => {
+    const next = new URLSearchParams(params);
+    for (const [k, v] of Object.entries(patch)) { if (v) next.set(k, v); else next.delete(k); }
+    if (!('page' in patch)) next.delete('page');
+    location.hash = `#/tenders/eop?${next}`;
+  };
+  const form = h('form', { class: 'eop-filters', role: 'search' },
+    h('label', { class: 'search' }, icon('search', 18), h('input', { type: 'search', name: 'q', value: query.get('q') || '', placeholder: 'Предмет, възложител, ЕИК или номер', 'aria-label': 'Търсене в обявленията' })),
+    h('input', { name: 'cpv', value: query.get('cpv') || '', placeholder: 'CPV, напр. 45, 79211', 'aria-label': 'CPV кодове', inputmode: 'numeric' }),
+    h('select', { name: 'category', 'aria-label': 'Вид' }, h('option', { value: '' }, 'Всички видове'),
+      Object.entries(res.categories).map(([v, l]) => h('option', { value: v, selected: query.get('category') === v }, l))),
+    h('select', { name: 'region', 'aria-label': 'Област' }, h('option', { value: '' }, 'Всички области'),
+      Object.entries(res.regions).sort((a, b) => a[1].localeCompare(b[1], 'bg')).map(([v, l]) => h('option', { value: v, selected: query.get('region') === v }, l))),
+    h('input', { name: 'minValue', value: query.get('minValue') || '', placeholder: 'Стойност от (EUR)', 'aria-label': 'Минимална прогнозна стойност', inputmode: 'numeric' }),
+    h('button', { class: 'btn', type: 'submit' }, 'Търсете'));
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const v = formValues(form);
+    go2({ q: v.q, cpv: v.cpv, category: v.category, region: v.region, minValue: v.minValue });
+  });
+  form.querySelectorAll('select').forEach((s) => s.addEventListener('change', () => form.requestSubmit()));
+
+  const follow = async (n, button) => {
+    button.disabled = true;
+    try {
+      const tender = await api(`/eop/notices/${n.id}/follow`, { method: 'POST' });
+      await refresh();
+      toast('Поръчката е добавена към Вашите поръчки.');
+      location.hash = `#/tenders/${tender.id}`;
+    } catch (err) {
+      button.disabled = false;
+      if (err.status === 409 && err.fields?.id) { location.hash = `#/tenders/${err.fields.id}`; return; }
+      toast(err.message);
+    }
+  };
+  const card = (n) => {
+    const soon = n.deadline && Date.parse(n.deadline) - Date.now() < 5 * 864e5;
+    const action = n.followedId
+      ? h('a', { class: 'btn btn--ghost btn--small', href: `#/tenders/${n.followedId}` }, icon('check', 16), 'Следите я')
+      : canEdit() && h('button', { class: 'btn btn--small', type: 'button', onclick: (e) => follow(n, e.currentTarget) }, icon('plus', 16), 'Следете');
+    return h('article', { class: 'card eop-card' },
+      h('div', { class: 'eop-card__head' },
+        h('h2', { class: 'eop-card__title' }, h('a', { href: n.url, target: '_blank', rel: 'noopener' }, n.title)),
+        action),
+      h('p', { class: 'small' }, h('strong', {}, n.buyer), n.buyerEik && ` · ЕИК ${n.buyerEik}`, (n.city || res.regions[n.region]) && ` · ${[n.city, res.regions[n.region]].filter(Boolean).join(', ')}`),
+      n.description && h('p', { class: 'small muted eop-card__desc' }, n.description),
+      h('div', { class: 'eop-card__meta small' },
+        h('span', {}, h('span', { class: 'muted' }, 'Срок за оферти: '), h('strong', { class: soon ? 'text-warn' : '' }, n.deadline ? formatTime(n.deadline) : '—')),
+        n.value !== '' && h('span', {}, h('span', { class: 'muted' }, 'Прогнозна стойност: '), money(n.value)),
+        h('span', {}, [res.categories[n.category], n.procedure, n.eu && 'над праговете на ЕС'].filter(Boolean).join(' · ')),
+        n.cpv.length > 0 && h('span', {}, h('span', { class: 'muted' }, 'CPV: '), n.cpv.join(', ')),
+        n.lots.length > 0 && h('span', {}, `${n.lots.length} обособени позиции`),
+        h('span', { class: 'muted' }, `ID ${n.id}`)));
+  };
+
+  const pages = Math.ceil(res.total / res.pageSize);
+  const pagerEl = pages > 1 && h('div', { class: 'pager' },
+    h('span', { class: 'small muted' }, `Страница ${res.page} от ${pages} · ${res.total} обявления`),
+    h('div', { class: 'row-tight' },
+      h('button', { class: 'btn btn--ghost btn--small', type: 'button', disabled: res.page <= 1, onclick: () => go2({ page: String(res.page - 1) }) }, 'Назад'),
+      h('button', { class: 'btn btn--ghost btn--small', type: 'button', disabled: res.page >= pages, onclick: () => go2({ page: String(res.page + 1) }) }, 'Напред')));
+
+  const alertCard = () => {
+    if (!isAdmin()) return null;
+    const input = h('input', { id: 'f-eopCpv', name: 'cpv', value: res.cpvAlert, placeholder: 'напр. 45, 71000000, 79211' });
+    const save = h('button', { class: 'btn btn--ghost btn--small', type: 'button', disabled: !canEdit() }, 'Запазете');
+    save.addEventListener('click', async () => {
+      const r = await act(() => api('/eop/alert', { method: 'PUT', body: { cpv: input.value } }), 'Известията са запазени.');
+      if (r) input.value = r.cpvAlert;
+    });
+    return h('section', { class: 'card stack-tight' },
+      h('h2', { class: 'card__title' }, 'Известия по имейл'),
+      h('p', { class: 'small muted' }, 'При нови обявления с тези CPV кодове (или започващи с тях) хората във фирмата получават имейл всяка сутрин. Празно = без известия.'),
+      h('div', { class: 'eop-alert' }, input, save));
+  };
+
+  page(
+    h('a', { class: 'back', href: '#/tenders' }, icon('back', 16), 'Нашите поръчки'),
+    pageHead('Обявления в ЦАИС ЕОП', `${res.open} открити поръчки със срок за оферти в бъдещето${res.total !== res.open ? ` · ${res.total} отговарят на търсенето` : ''}`),
+    form,
+    h('div', { class: 'split split--wide-main' },
+      h('div', { class: 'stack' },
+        res.items.length ? res.items.map(card) : emptyState('scale', res.open ? 'Няма съвпадения' : 'Още няма внесени обявления', res.open ? 'Променете търсенето или филтрите.' : 'Обявленията се внасят всяка сутрин.'),
+        pagerEl),
+      h('div', { class: 'stack' },
+        alertCard(),
+        h('section', { class: 'card stack-tight' },
+          h('h2', { class: 'card__title' }, 'Източник'),
+          h('p', { class: 'small' }, res.source, '.'),
+          h('p', { class: 'small muted' }, res.importedAt ? `Обновено ${formatTime(res.importedAt)}${res.lastResourceName ? `; последни данни: ${res.lastResourceName.replace(/^.*публикувани в ЦАИС ЕОП /, '').replace(/, съгласно.*$/, '')}` : ''}.` : 'Още не е обновявано.'),
+          h('p', { class: 'small muted' }, 'АОП публикува данните с няколко дни закъснение. Меродавни са обявлението и документацията в ЦАИС ЕОП; офертите се подават само там, с КЕП.')))));
+}
+
 // --- БУЛАДМИН: организации, планове, потребители ---
 
 let platform = null;
@@ -1989,6 +2090,7 @@ async function route() {
     if (section === 'users' && isAdmin()) return viewUsers();
     if (section === 'settings' && isAdmin()) return viewSettings();
     if (meta.entities[section]?.generic && !sectionAllowed(section)) return viewUpsell(section);
+    if (section === 'tenders' && id === 'eop') return await viewEopNotices(query);
     if (meta.entities[section]?.generic) return id ? await viewRecord(section, id) : viewList(section, query);
     page(emptyState('alert', 'Страницата не е намерена', null, h('a', { class: 'btn', href: '#/' }, 'Към таблото')));
   } catch (err) {

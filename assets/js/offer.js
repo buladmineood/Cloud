@@ -1,6 +1,6 @@
 // Страницата, която клиентът отваря от имейла: преглед на офертата, PDF и отговор „Приемам“ или „Отказвам“.
-import { api, formatDate, formValues, h, icon, money, num, round2, showError, showFieldErrors } from './core.js?v=300b380863';
-import { buildPdf, saveFile } from './pdf.js?v=300b380863';
+import { api, formatDate, formValues, h, icon, money, num, round2, showError, showFieldErrors } from './core.js?v=8fdd9a957d';
+import { buildPdf, saveFile } from './pdf.js?v=8fdd9a957d';
 
 const root = document.getElementById('offer');
 

@@ -110,6 +110,27 @@ powershell -ExecutionPolicy Bypass -File worker\scripts\setup-mail.ps1
 **Никога не добавяйте `Mail.Send` на приложението в Entra:** там правото важи за всички кутии в tenant-а.
 
 
+### Обявления от ЦАИС ЕОП
+
+Вносът **не минава през Cloudflare Worker-а**. Пуска го GitHub Actions ([.github/workflows/eop-import.yml](../.github/workflows/eop-import.yml)) всеки ден в 09:00 UTC (11:00 или 12:00 българско време) със скрипта `worker/scripts/eop-import.mjs`. Скриптът взима новите дни от Портала за отворени данни (data.egov.bg, Агенция по обществени поръчки, организация 502, наборите „Автоматично генерирани данни за обявления, публикувани в ЦАИС ЕОП… OCDS“) и пише направо в SharePoint през Microsoft Graph:
+
+- файла `ЦАИС ЕОП/обявления.json` в библиотеката „Документи“ на общия сайт (само откритите поръчки; изтеклите и възложените се махат);
+- следените поръчки в сайтовете на фирмите (нов срок, класиране, договор, прекратяване) и имейлите по CPV.
+
+Worker-ът само чете файла (кеш до 30 минути), за да покаже страницата „Обявления в ЦАИС ЕОП“.
+
+Еднократна настройка в GitHub: **Settings → Secrets and variables → Actions → New repository secret**, име `MS_CERT_PRIVATE_KEY`, стойността от `worker/.dev.vars`. Ръчно пускане: **Actions → ЦАИС ЕОП внос → Run workflow**.
+
+От компютър (същото, напр. за наваксване):
+
+```
+cd worker
+node scripts/eop-import.mjs --dry   # колко дни чакат
+node scripts/eop-import.mjs
+```
+
+Локално: `DEV_EOP=1 npm run dev` зарежда истинските обявления в демо сървъра.
+
 ## Ежедневна работа
 
 ### Администратори на БУЛАДМИН („БУЛАДМИН“ в менюто)

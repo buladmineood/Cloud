@@ -298,6 +298,17 @@ export class GraphStore {
     return new Uint8Array(await res.arrayBuffer());
   }
 
+  // Файл по път в библиотеката; null, ако го няма.
+  async downloadPath(path) {
+    const encoded = path.split('/').map(encodeURIComponent).join('/');
+    const res = await this.fetch(`${await this.driveUrl()}/root:/${encoded}:/content`, {
+      headers: { authorization: `Bearer ${await this.accessToken()}` },
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
   async deleteFile(itemId) {
     const res = await this.fetch(`${await this.driveUrl()}/items/${encodeURIComponent(itemId)}`, {
       method: 'DELETE',
@@ -366,6 +377,10 @@ export class MemoryStore {
     const file = this.files.get(itemId);
     if (!file) throw new Error('missing');
     return file.bytes;
+  }
+  async downloadPath(path) {
+    const file = [...this.files.values()].find((f) => f.path === path);
+    return file ? file.bytes : null;
   }
   async deleteFile(itemId) { this.files.delete(itemId); }
   async sendMail(from, to, subject, { html, text }, extra = {}) { this.sentMail.push({ from, to, subject, text, html, ...extra }); }

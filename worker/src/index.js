@@ -12,7 +12,7 @@ export default {
   fetch(request, env, ctx) {
     return app(env)(request, ctx);
   },
-  // Ежедневните напомняния по имейл (виж triggers в wrangler.toml).
+  // Виж triggers в wrangler.toml: ежедневни напомняния по имейл.
   scheduled(controller, env, ctx) {
     ctx.waitUntil(app(env).digest().then((r) => console.log('digest', r)));
   },

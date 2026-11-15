@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createApp, SESSION_COOKIE } from '../src/app.js';
 import { computeTotals } from '../src/documents.js';
 import { defaultChecklist } from '../src/procurement.js';
+import { EOP_FILE, importStep } from '../src/eop.js';
 import { b64url, sha256, signToken } from '../src/crypto.js';
 import { MemoryStore } from '../src/store.js';
 
@@ -151,6 +152,14 @@ store.createSite = async ({ sitePath }) => {
   return store.siteStatus(sitePath);
 };
 const app = createApp({ env, store });
+
+// DEV_EOP=1: истинските обявления от ЦАИС ЕОП (data.egov.bg) за последните 45 дни; без него списъкът е празен.
+if (process.env.DEV_EOP) {
+  importStep(fetch, null, new Date().toISOString(), { max: 60 }).then(async ({ state }) => {
+    await store.uploadFile(EOP_FILE, new TextEncoder().encode(JSON.stringify(state)), 'application/json');
+    console.log(`  ЦАИС ЕОП: ${state.notices.length} открити поръчки`);
+  }).catch((err) => console.error('ЦАИС ЕОП:', err.message));
+}
 
 const devUsers = { admin: 'admin@buladmin.eu', user: 'sales@buladmin.eu', viewer: 'viewer@buladmin.eu' };
 const MIME = {

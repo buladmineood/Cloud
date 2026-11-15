@@ -11,6 +11,7 @@ import {
   DEFAULT_PLANS, defaultPlan, DOC_LIMIT, effectivePlan, EMAIL_ACTION, ENTITY_LIMIT, FEATURES, hasFeature, LIMITS, limitOf, paidPlans, paymentDue,
   PLAN_NUMBERS, usageOf,
 } from './plans.js';
+import { CATEGORIES, EOP_FILE, EOP_SOURCE, eopUrl, filterNotices, importStep, REGIONS, stillOpen } from './eop.js';
 import { CHECKLIST_STATES, defaultChecklist, OPEN_TENDER_STAGES, validateChecklist } from './procurement.js';
 import schema from './schema.json' with { type: 'json' };
 import {
@@ -1908,6 +1909,192 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     return { sent };
   }
 
+
+  // --- Обявления от ЦАИС ЕОП (отворени данни на АОП) ---
+
+  // Откритите поръчки се пазят като един JSON файл в общия сайт; кешират се за 30 минути в Cloudflare.
+  const EOP_CACHE_KEY = `${env.APP_ORIGIN}/__cache/eop-notices`;
+  const eopCache = () => (typeof caches !== 'undefined' ? caches.default : null);
+
+  async function loadEopState({ fresh = false } = {}) {
+    const cache = eopCache();
+    if (cache && !fresh) {
+      const hit = await cache.match(EOP_CACHE_KEY).catch(() => null);
+      if (hit) return hit.json();
+    }
+    const bytes = await store.downloadPath(EOP_FILE);
+    const state = bytes ? JSON.parse(new TextDecoder().decode(bytes)) : { notices: [], lastResourceAt: '', importedAt: '' };
+    if (cache) {
+      await cache.put(EOP_CACHE_KEY, new Response(JSON.stringify(state), {
+        headers: { 'content-type': 'application/json', 'cache-control': 'max-age=1800' },
+      })).catch(() => {});
+    }
+    return state;
+  }
+
+  async function eopNotices(request, url) {
+    const ctx = await orgContext(request);
+    requireFeature(ctx, 'allowProcurement');
+    const state = await loadEopState();
+    const q = url.searchParams;
+    const open = stillOpen(state.notices, now().toISOString());
+    const found = filterNotices(open, {
+      q: clean(q.get('q'), 200), cpv: clean(q.get('cpv'), 200), category: clean(q.get('category'), 20),
+      region: clean(q.get('region'), 10), minValue: clean(q.get('minValue'), 20),
+    }).sort((a, b) => String(b.published).localeCompare(String(a.published)));
+    const page = Math.max(1, Number(q.get('page')) || 1);
+    const followed = new Map((await ctx.db.find('tenders', 'orgId', ctx.org.id)).filter((x) => x.eopId).map((x) => [x.eopId, x.id]));
+    return json({
+      source: EOP_SOURCE,
+      importedAt: state.importedAt || '',
+      lastResourceName: state.lastResourceName || '',
+      total: found.length,
+      open: open.length,
+      page,
+      pageSize: 50,
+      items: found.slice((page - 1) * 50, page * 50).map((n) => ({ ...n, url: eopUrl(n.id), followedId: followed.get(n.id) || '' })),
+      regions: REGIONS,
+      categories: CATEGORIES,
+      cpvAlert: ctx.org.eopCpv || '',
+    });
+  }
+
+  // „Следете“: поръчката от ЦАИС ЕОП става поръчка на фирмата с попълнени данни.
+  async function followNotice(request, noticeId) {
+    const ctx = await orgContext(request, { role: 'editor' });
+    requireFeature(ctx, 'allowProcurement');
+    const notice = (await loadEopState()).notices.find((n) => n.id === noticeId)
+      || (await loadEopState({ fresh: true })).notices.find((n) => n.id === noticeId);
+    if (!notice) throw new HttpError(404, 'Обявлението вече не е сред откритите поръчки.');
+    const [existing] = (await ctx.db.find('tenders', 'eopId', notice.id)).filter((x) => x.orgId === ctx.org.id);
+    if (existing) throw new HttpError(409, 'Тази поръчка вече е в списъка Ви.', { id: existing.id });
+    const [company] = notice.buyerEik ? (await ctx.db.find('companies', 'orgId', ctx.org.id)).filter((c) => c.eik === notice.buyerEik) : [];
+    const stamp = nowIso();
+    const lotLines = notice.lots.map((l) => `${l.id}: ${l.title}${l.value ? ` — ${l.value} EUR` : ''}`);
+    const record = {
+      id: newId('tenders'),
+      orgId: ctx.org.id,
+      tenderName: notice.title,
+      eopId: notice.id,
+      authority: [notice.buyer, notice.buyerEik && `ЕИК ${notice.buyerEik}`].filter(Boolean).join(', '),
+      companyId: company?.id || '',
+      procedureType: notice.procedure || '',
+      stage: 'Проучване',
+      eopUrl: eopUrl(notice.id),
+      cpv: notice.cpv.join(', '),
+      estimatedValue: notice.value,
+      submissionDeadline: notice.deadline ? new Date(notice.deadline).toISOString() : '',
+      owner: ctx.user.id,
+      checklist: JSON.stringify(defaultChecklist()),
+      notes: [
+        `Внесено от ЦАИС ЕОП (отворени данни на АОП), ID ${notice.id}.`,
+        lotLines.length ? `Обособени позиции:\n${lotLines.join('\n')}` : '',
+        'Проверете сроковете и документацията в ЦАИС ЕОП: там е меродавната информация.',
+      ].filter(Boolean).join('\n\n'),
+      createdAt: stamp,
+      updatedAt: stamp,
+    };
+    await ctx.db.create('tenders', record);
+    await audit(ctx, 'tenders', record.id, 'Създаване', `от ЦАИС ЕОП, ID ${notice.id}`);
+    return json(publicTender(publicRecord('tenders', record)), 201);
+  }
+
+  // CPV кодовете, за които фирмата получава имейл при нови обявления.
+  async function saveEopAlert(request) {
+    const ctx = await orgContext(request, { role: 'admin' });
+    requireFeature(ctx, 'allowProcurement');
+    const raw = clean((await readBody(request)).cpv, 300);
+    const codes = [...new Set(raw.split(/[\s,;]+/).map((c) => c.replace(/\D/g, '').slice(0, 8)).filter((c) => c.length >= 2))].slice(0, 30);
+    await store.update('orgs', ctx.org.id, { eopCpv: codes.join(', '), updatedAt: nowIso() });
+    await audit(ctx, 'orgs', ctx.org.id, 'Известия от ЦАИС ЕОП', codes.join(', ') || 'изключени');
+    return json({ cpvAlert: codes.join(', ') });
+  }
+
+  // Ежедневен внос: нови дни от data.egov.bg, промени по следените поръчки и известия за нови обявления.
+  async function eopImport({ max } = {}) {
+    const previous = await loadEopState({ fresh: true });
+    const known = new Set(previous.notices.map((n) => n.id));
+    const result = await importStep(fetchImpl, previous, now().toISOString(), { max });
+    if (!result.imported && result.state.notices.length === previous.notices.length) {
+      return { imported: 0, remaining: result.remaining, open: previous.notices.length, new: 0, updated: 0, alerts: 0 };
+    }
+    await store.uploadFile(EOP_FILE, new TextEncoder().encode(JSON.stringify(result.state)), 'application/json');
+    await eopCache()?.delete(EOP_CACHE_KEY).catch(() => {});
+    // При първия внос (празен файл) не се пращат известия за всички натрупани поръчки.
+    const fresh = previous.lastResourceAt ? result.state.notices.filter((n) => !known.has(n.id)) : [];
+    const [orgs, plans] = await Promise.all([store.list('orgs'), loadPlans()]);
+    let updated = 0;
+    let alerts = 0;
+    for (const org of orgs) {
+      if (org.orgStatus !== 'Активна' || paymentDue(org, today()) || (org.dbStatus && org.dbStatus !== 'Готова')) continue;
+      if (!hasFeature(effectivePlan(org, plans, today()), 'allowProcurement')) continue;
+      try {
+        updated += await applyEopEvents(org, result.events);
+        if (org.eopCpv && fresh.length && mailEnabled) alerts += await sendEopAlert(org, fresh);
+      } catch (err) {
+        console.error('eop org failed', org.id, err.message);
+      }
+    }
+    return { imported: result.imported, remaining: result.remaining, open: result.state.notices.length, new: fresh.length, updated, alerts };
+  }
+
+  async function applyEopEvents(org, events) {
+    if (!events.length) return 0;
+    const db = orgDb(org);
+    const tenders = (await db.find('tenders', 'orgId', org.id)).filter((x) => x.eopId);
+    if (!tenders.length) return 0;
+    const ctx = { org, db, user: { id: 'system', fullName: 'ЦАИС ЕОП (отворени данни)' } };
+    let count = 0;
+    for (const e of events) {
+      for (const tender of tenders.filter((x) => x.eopId === e.id)) {
+        const patch = {};
+        let summary = '';
+        if (e.kind === 'deadline' && e.deadline) {
+          patch.submissionDeadline = new Date(e.deadline).toISOString();
+          summary = `Нов срок за подаване: ${formatSofia(patch.submissionDeadline)}`;
+        } else if (e.kind === 'award' || e.kind === 'contract') {
+          const ours = e.suppliers.some((s) => s.eik && s.eik === org.eik);
+          const names = e.suppliers.map((s) => s.name).filter(Boolean).join(', ') || 'не е посочен';
+          summary = `${e.kind === 'contract' ? 'Договор' : 'Класиране'}: изпълнител ${names}${e.contractValue ? `, ${e.contractValue} EUR` : ''}`;
+          if (ours && e.kind === 'contract') Object.assign(patch, { stage: 'Договор', contractDate: e.contractDate || '', contractValue: e.contractValue });
+          else if (ours) Object.assign(patch, { stage: 'Класирана първа', resultDate: (e.date || '').slice(0, 10) });
+        } else if (e.kind === 'cancelled') {
+          patch.stage = 'Прекратена';
+          summary = 'Поръчката е прекратена или неуспешна';
+        }
+        if (!summary) continue;
+        patch.notes = [tender.notes, `${formatDay(today())} — ЦАИС ЕОП: ${summary}.`].filter(Boolean).join('\n');
+        patch.updatedAt = nowIso();
+        await db.update('tenders', tender.id, patch);
+        await audit(ctx, 'tenders', tender.id, 'ЦАИС ЕОП', summary);
+        await notifyUser(tender.owner, `ЦАИС ЕОП: ${tender.tenderName}`.slice(0, 200), {
+          title: 'Промяна по следена поръчка',
+          paragraphs: [`В ЦАИС ЕОП има ново обявление по „${tender.tenderName}“ (${org.name}).`, summary],
+          action: { label: 'Отворете поръчката', url: `${env.APP_ORIGIN}/app.html#/tenders/${tender.id}` },
+        });
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  async function sendEopAlert(org, fresh) {
+    const matches = filterNotices(fresh, { cpv: org.eopCpv });
+    if (!matches.length) return 0;
+    const members = (await store.find('members', 'orgId', org.id)).filter((m) => m.isActive === 'Да' && m.role !== VIEWER);
+    let sent = 0;
+    for (const m of members) {
+      const ok = await notifyUser(m.userId, `${org.name}: ${matches.length} нови обществени поръчки по Вашите CPV кодове`, {
+        title: 'Нови обявления в ЦАИС ЕОП',
+        paragraphs: [`Нови открити поръчки по CPV ${org.eopCpv} за „${org.name}“:`],
+        details: matches.slice(0, 20).map((n) => [n.buyer || 'Възложител', `${n.title}${n.value ? ` — ${n.value} EUR` : ''}${n.deadline ? `, срок ${formatSofia(new Date(n.deadline).toISOString())}` : ''}`]),
+        action: { label: 'Вижте всички', url: `${env.APP_ORIGIN}/app.html#/tenders/eop?cpv=${encodeURIComponent(org.eopCpv)}` },
+      });
+      if (ok) sent += 1;
+    }
+    return sent;
+  }
+
   // --- Маршрутизиране ---
 
   async function route(request, url, ctx) {
@@ -1947,6 +2134,9 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (method === 'GET' && path === '/api/data') return bootstrap(request);
     if (method === 'GET' && path === '/api/rates') return ecbRate(request, url);
     if (method === 'PUT' && (m = path.match(/^\/api\/tenders\/([\w-]{1,40})\/checklist$/))) return saveChecklist(request, m[1]);
+    if (method === 'GET' && path === '/api/eop/notices') return eopNotices(request, url);
+    if (method === 'POST' && (m = path.match(/^\/api\/eop\/notices\/(\d{1,12})\/follow$/))) return followNotice(request, m[1]);
+    if (method === 'PUT' && path === '/api/eop/alert') return saveEopAlert(request);
     if (method === 'POST' && (m = path.match(/^\/api\/documents\/([\w-]{1,40})\/send$/))) return sendDocument(request, m[1]);
     if (method === 'GET' && (m = path.match(/^\/api\/history\/(\w+)\/([^/]{1,200})$/))) return history(request, m[1], decodeURIComponent(m[2]));
     if ((m = path.match(/^\/api\/data\/(\w+)(?:\/([\w-]{1,40}))?$/)) && GENERIC.includes(m[1])) {
@@ -2012,5 +2202,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   };
   // Ежедневните напомняния се пускат от Cloudflare Cron (виж index.js).
   handle.digest = dailyDigest;
+  // Вносът от ЦАИС ЕОП се пуска от scripts/eop-import.mjs (GitHub Actions), не от Worker-а.
+  handle.eopImport = eopImport;
   return handle;
 }

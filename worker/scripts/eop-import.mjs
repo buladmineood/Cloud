@@ -1,4 +1,5 @@
-// Внася обявленията от ЦАИС ЕОП (data.egov.bg, АОП, OCDS) в общия SharePoint сайт — без Worker-а.
+// Внася обявленията от ЦАИС ЕОП (отворени данни на АОП, OCDS) в общия SharePoint сайт — без Worker-а.
+// Основен източник: ЦАИС ЕОП → „Отворени данни“ (storage.eop.bg); резервен: data.egov.bg.
 // Пуска се всеки ден от GitHub Actions (.github/workflows/eop-import.yml) или ръчно от компютър.
 // Освен файла с откритите поръчки обновява следените поръчки във фирмите (нов срок, класиране,
 // договор, прекратяване) и праща имейлите по CPV — същата логика като в приложението (src/app.js).
@@ -42,5 +43,6 @@ if (process.argv.includes('--dry')) {
   console.log(`Чакащи дни: ${remaining}`);
 } else {
   const result = await createApp({ env, store }).eopImport({ max: 60 });
-  console.log(`Внесени дни: ${result.imported}; открити поръчки: ${result.open}; нови: ${result.new}; обновени следени: ${result.updated}; имейли по CPV: ${result.alerts}; остават: ${result.remaining}`);
+  const bySource = Object.entries((result.sources || []).reduce((acc, s) => ({ ...acc, [s]: (acc[s] || 0) + 1 }), {})).map(([s, n]) => `${s}: ${n}`).join(', ');
+  console.log(`Внесени дни: ${result.imported}${bySource ? ` (${bySource})` : ''}; открити поръчки: ${result.open}; нови: ${result.new}; обновени следени: ${result.updated}; имейли по CPV: ${result.alerts}; остават: ${result.remaining}`);
 }

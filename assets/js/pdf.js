@@ -1,6 +1,6 @@
 // Създава PDF на оферта или фактура в браузъра с pdf-lib и шрифта Onest (кирилица).
 // Библиотеките (около 1,3 MB) се зареждат само при първото създаване на PDF.
-import { addressLine } from './core.js?v=3f2e5a7770';
+import { addressLine } from './core.js?v=c0e092ac04';
 
 const NAVY = [16, 41, 76];
 const GOLD = [181, 134, 42];

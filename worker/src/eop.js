@@ -1,16 +1,22 @@
-// Обявления от ЦАИС ЕОП: отворени данни на Агенцията по обществени поръчки (АОП) в Портала за отворени данни
-// (data.egov.bg, организация 502), във формат Open Contracting Data Standard (OCDS), лиценз CC0.
-// АОП публикува по един JSON ресурс за всеки ден с всички обявления от ЦАИС ЕОП за деня (около 5 MB),
-// групирани в набор за месеца. Системата пази само откритите поръчки със срок за оферти в бъдещето.
+// Обявления от ЦАИС ЕОП: отворени данни на Агенцията по обществени поръчки (АОП) във формат
+// Open Contracting Data Standard (OCDS), лиценз CC0. АОП публикува по един JSON файл за всеки ден
+// с всички обявления от деня на две места:
+//   1. ЦАИС ЕОП → „Отворени данни“ (https://app.eop.bg/today/reporting/open-data): файлът е на постоянен
+//      адрес в storage.eop.bg и излиза около 08:00 българско време на следващия ден. Основен източник.
+//   2. Портал за отворени данни (data.egov.bg, организация 502): същите данни, понякога със закъснение
+//      от седмици. Резервен източник, ако файлът в ЦАИС ЕОП липсва или сървърът не отговаря.
+// Системата пази само откритите поръчки със срок за оферти в бъдещето.
 import { clean } from './validate.js';
 
 export const EGOV_API = 'https://data.egov.bg/api';
 export const AOP_ORG_ID = 502;
 export const EOP_FILE = 'ЦАИС ЕОП/обявления.json';
-export const EOP_SOURCE = 'Портал за отворени данни (data.egov.bg), Агенция по обществени поръчки, OCDS, CC0';
+export const EOP_STORAGE = 'https://storage.eop.bg';
+export const EOP_SOURCE = 'ЦАИС ЕОП — Отворени данни (app.eop.bg) и Портал за отворени данни (data.egov.bg), Агенция по обществени поръчки, OCDS, CC0';
 const DATASET_NAME = /обявления, публикувани в ЦАИС ЕОП/i;
 const BGN_PER_EUR = 1.95583; // фиксиран курс; от 1.1.2026 г. стойностите са в евро
-const MAX_RESOURCES_PER_RUN = 3; // ~5 MB всеки; останалите се взимат при следващото пускане
+const MAX_RESOURCES_PER_RUN = 3; // ~2–5 MB всеки; останалите се взимат при следващото пускане
+const WAIT_DAYS = 3; // ден, който липсва и в двата източника, се чака толкова дни, после се пропуска
 
 export const eopUrl = (id) => `https://app.eop.bg/today/${encodeURIComponent(id)}`;
 
@@ -166,32 +172,85 @@ export async function resourceReleases(fetchImpl, uri) {
   return Array.isArray(data?.releases) ? data.releases : [];
 }
 
-// Една стъпка от вноса: до MAX_RESOURCES_PER_RUN нови дни. Безопасно е да се пуска многократно.
-export async function importStep(fetchImpl, state, nowIso, { max = MAX_RESOURCES_PER_RUN } = {}) {
-  const current = state || { notices: [], lastResourceAt: '', processed: [] };
+// --- ЦАИС ЕОП → Отворени данни ---
+
+const dmy = (iso) => iso.split('-').reverse().join('.');
+export const dayName = (iso) => `Автоматично генерирани данни за обявления, публикувани в ЦАИС ЕОП на ${dmy(iso)} г., съгласно стандарт OCDS`;
+export const eopDayUrl = (iso) => `${EOP_STORAGE}/open-data-${iso}/${encodeURIComponent(dayName(iso))}.json`;
+
+// Releases за деня или null, ако файлът още не е публикуван (хранилището връща 403/404).
+export async function eopDayReleases(fetchImpl, iso) {
+  const res = await fetchImpl(eopDayUrl(iso), { headers: { accept: 'application/json' } });
+  if (res.status === 403 || res.status === 404) return null;
+  if (!res.ok) throw new Error(`storage.eop.bg ${iso}: ${res.status}`);
+  const data = await res.json();
+  return Array.isArray(data.releases) ? data.releases : [];
+}
+
+const addDays = (iso, n) => new Date(Date.parse(`${iso}T00:00:00Z`) + n * 864e5).toISOString().slice(0, 10);
+const sofiaDay = (nowIso) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Sofia' }).format(new Date(nowIso));
+
+// Последният обработен ден; по-старите файлове пазеха само името на ресурса от data.egov.bg.
+function lastDay(state, nowIso) {
+  if (state.lastDate) return state.lastDate;
+  const m = String(state.lastResourceName || '').match(/на (\d\d)\.(\d\d)\.(\d{4})/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
   // Първият внос взима последните 45 дни: колкото обикновено е срокът за оферти.
-  const after = current.lastResourceAt || new Date(Date.parse(nowIso) - 45 * 864e5).toISOString().slice(0, 19).replace('T', ' ');
-  const pending = await pendingResources(fetchImpl, after);
+  return addDays(sofiaDay(nowIso), -46);
+}
+
+// Една стъпка от вноса: до max нови дни. Безопасно е да се пуска многократно.
+export async function importStep(fetchImpl, state, nowIso, { max = MAX_RESOURCES_PER_RUN } = {}) {
+  const current = state || { notices: [] };
+  const yesterday = addDays(sofiaDay(nowIso), -1);
+  let day = lastDay(current, nowIso);
   let notices = current.notices;
   const events = [];
-  const done = [];
-  for (const resource of pending.slice(0, max)) {
-    const result = applyReleases(notices, await resourceReleases(fetchImpl, resource.uri));
+  const sources = [];
+  let imported = 0;
+  let skipped = 0;
+  let egovList = null;
+  const fromEgov = async (iso) => {
+    egovList ??= await pendingResources(fetchImpl, `${addDays(iso, -1)} 00:00:00`).catch(() => []);
+    const resource = egovList.find((r) => r.name.includes(`на ${dmy(iso)} г.`));
+    return resource ? resourceReleases(fetchImpl, resource.uri) : null;
+  };
+  while (day < yesterday && imported < max) {
+    const next = addDays(day, 1);
+    let releases = await eopDayReleases(fetchImpl, next).catch(() => null);
+    let source = 'ЦАИС ЕОП';
+    if (!releases) {
+      releases = await fromEgov(next).catch(() => null);
+      source = 'data.egov.bg';
+    }
+    if (!releases) {
+      // Още не е публикуван: опитва се при следващото пускане. По-стар ден без данни се пропуска.
+      if (next >= addDays(yesterday, -WAIT_DAYS)) break;
+      skipped += 1;
+      day = next;
+      continue;
+    }
+    const result = applyReleases(notices, releases);
     notices = result.notices;
     events.push(...result.events);
-    done.push(resource);
+    sources.push(source);
+    imported += 1;
+    day = next;
   }
   notices = stillOpen(notices, nowIso);
-  const last = done[done.length - 1];
+  const remaining = Math.max(0, Math.round((Date.parse(yesterday) - Date.parse(day)) / 864e5));
   return {
     state: {
       notices,
-      lastResourceAt: last ? last.createdAt : current.lastResourceAt,
-      lastResourceName: last ? last.name : current.lastResourceName || '',
+      lastDate: day,
+      lastResourceName: imported || skipped ? dayName(day) : current.lastResourceName || dayName(day),
+      lastSource: sources.at(-1) || current.lastSource || '',
       importedAt: nowIso,
     },
     events,
-    imported: done.length,
-    remaining: Math.max(0, pending.length - done.length),
+    imported,
+    skipped,
+    sources,
+    remaining,
   };
 }

@@ -1,7 +1,7 @@
-// Обявления от ЦАИС ЕОП: внос от data.egov.bg (OCDS), търсене, „Следете“, промени и известия.
+// Обявления от ЦАИС ЕОП: внос от ЦАИС ЕОП / data.egov.bg (OCDS), търсене, „Следете“, промени и известия.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { applyReleases, compactNotice, filterNotices } from '../src/eop.js';
+import { applyReleases, compactNotice, eopDayUrl, filterNotices, importStep } from '../src/eop.js';
 import { setup, siteOf } from './helpers.js';
 
 const party = (id, roles, eik, name, region = 'BG411', locality = 'София') => ({
@@ -25,10 +25,20 @@ const awardRelease = (id, eik, name, tag = 'contract') => ({
   contracts: [{ value: { amount: 1000, currency: 'EUR' }, dateSigned: '2026-11-12T00:00:00Z' }],
 });
 
-// Фалшив Портал за отворени данни: един месечен набор с ресурси (дни).
+// Фалшиви източници: файлове по дни в storage.eop.bg и един месечен набор в data.egov.bg.
+// Ден с onlyEgov липсва в ЦАИС ЕОП (403), ден с onlyEop липсва в data.egov.bg.
 function egov(days) {
   const calls = [];
   const fetchImpl = async (url, init) => {
+    if (url.startsWith('https://storage.eop.bg/')) {
+      const date = url.match(/open-data-(\d{4}-\d\d-\d\d)\//)[1];
+      const day = days.find((d) => d.date === date && !d.onlyEgov);
+      calls.push(`eop ${date}${day ? '' : ' 403'}`);
+      assert.equal(url, eopDayUrl(date));
+      return day
+        ? new Response(JSON.stringify({ license: 'https://opendefinition.org/licenses/cc-zero/', releases: day.releases }), { headers: { 'content-type': 'application/json' } })
+        : new Response('<Error>AccessDenied</Error>', { status: 403 });
+    }
     const method = url.split('/api/')[1];
     const body = JSON.parse(init.body);
     calls.push(method);
@@ -37,7 +47,7 @@ function egov(days) {
       assert.deepEqual(body.criteria.org_ids, [502]);
       return ok({ datasets: [{ uri: 'ds-11', name: 'Автоматично генерирани данни за обявления, публикувани в ЦАИС ЕОП през месец 11.2026 г.', updated_at: days.at(-1).createdAt }] });
     }
-    if (method === 'listResources') return ok({ resources: days.map((d) => ({ uri: d.uri, name: `ден ${d.uri}`, created_at: d.createdAt })) });
+    if (method === 'listResources') return ok({ resources: days.filter((d) => !d.onlyEop).map((d) => ({ uri: d.uri, name: `Автоматично генерирани данни за обявления, публикувани в ЦАИС ЕОП на ${d.date.split('-').reverse().join('.')} г., съгласно стандарт OCDS`, created_at: d.createdAt })) });
     if (method === 'getResourceData') return ok({ data: { releases: days.find((d) => d.uri === body.resource_uri).releases } });
     throw new Error(`unexpected ${url}`);
   };
@@ -64,7 +74,7 @@ test('OCDS: компактен запис, лева в евро, срок от �
 
 test('внос, търсене и „Следете“: поръчката се добавя с данните от ЦАИС ЕОП', async () => {
   const days = [
-    { uri: 'r1', createdAt: '2026-11-11 08:00:00', releases: [tenderRelease(201), tenderRelease(202, { cpv: '79211000', category: 'services', title: 'Счетоводни услуги' }), tenderRelease(203, { end: '2026-11-01T10:00:00+02:00' })] },
+    { uri: 'r1', date: '2026-11-10', createdAt: '2026-11-11 08:00:00', releases: [tenderRelease(201), tenderRelease(202, { cpv: '79211000', category: 'services', title: 'Счетоводни услуги' }), tenderRelease(203, { end: '2026-11-01T10:00:00+02:00' })] },
   ];
   const { fetchImpl } = egov(days);
   const { call, store, app } = setup({ companies: [{ id: 'CO-9', orgId: 'ORG-A', name: 'Община Пример', relation: 'Клиент', eik: '000454145' }] }, { fetchImpl });
@@ -92,12 +102,12 @@ test('внос, търсене и „Следете“: поръчката се 
 });
 
 test('обявленията са само за план с модула „ЦАИС ЕОП“', async () => {
-  const { call } = setup({}, { plan: 'free', fetchImpl: egov([{ uri: 'r1', createdAt: '2026-11-11 08:00:00', releases: [] }]).fetchImpl });
+  const { call } = setup({}, { plan: 'free', fetchImpl: egov([{ uri: 'r1', date: '2026-11-10', createdAt: '2026-11-11 08:00:00', releases: [] }]).fetchImpl });
   assert.equal((await call('GET', '/api/eop/notices', { as: 'admin@x.bg' })).status, 402);
 });
 
 test('следващ ден: нов срок и договор с нашата фирма обновяват поръчката; известие по CPV', async () => {
-  const days = [{ uri: 'r1', createdAt: '2026-11-11 08:00:00', releases: [tenderRelease(301), tenderRelease(302)] }];
+  const days = [{ uri: 'r1', date: '2026-11-10', createdAt: '2026-11-11 08:00:00', releases: [tenderRelease(301), tenderRelease(302)] }];
   const { fetchImpl } = egov(days);
   const { call, store, app } = setup({}, { fetchImpl, mail: true });
   await app.eopImport();
@@ -107,7 +117,7 @@ test('следващ ден: нов срок и договор с нашата �
   assert.equal((await call('PUT', '/api/eop/alert', { as: 'admin@x.bg', body: { cpv: '45, 4521; x' } })).data.cpvAlert, '45, 4521');
   // ЕИК на ORG-A е 123456786 (COMPANY в helpers).
   days.push({
-    uri: 'r2', createdAt: '2026-11-12 08:00:00',
+    uri: 'r2', date: '2026-11-11', createdAt: '2026-11-12 08:00:00',
     releases: [tenderRelease(301, { tag: 'tenderAmendment', end: '2026-12-20T17:00:00+02:00' }), awardRelease(302, '123456786', 'Нашата ООД'), tenderRelease(303, { title: 'Ремонт на училище' }), tenderRelease(304, { cpv: '79211000' })],
   });
   store.sentMail.length = 0;
@@ -123,4 +133,29 @@ test('следващ ден: нов срок и договор с нашата �
   assert.ok(alert.length >= 1);
   assert.ok(alert.every((m) => m.html.includes('Ремонт на училище') && !m.html.includes('Поръчка 304')));
   assert.ok(store.sentMail.some((m) => m.to === 'user@x.bg' && /ЦАИС ЕОП: Поръчка 302/.test(m.subject)));
+});
+
+test('източници: ЦАИС ЕОП е основен, data.egov.bg е резервен; непубликуван ден се чака', async () => {
+  const days = [
+    { uri: 'r1', date: '2026-11-08', createdAt: '2026-11-09 08:00:00', releases: [tenderRelease(401)], onlyEop: true },
+    { uri: 'r2', date: '2026-11-09', createdAt: '2026-11-10 08:00:00', releases: [tenderRelease(402)], onlyEgov: true },
+    { uri: 'r3', date: '2026-11-10', createdAt: '2026-11-11 08:00:00', releases: [tenderRelease(403)] },
+  ];
+  const { fetchImpl, calls } = egov(days);
+  const now = '2026-11-14T07:30:00Z';
+  // Старо състояние от data.egov.bg (само име на ресурса) продължава от следващия ден.
+  const first = await importStep(fetchImpl, { notices: [], lastResourceName: 'Автоматично генерирани данни за обявления, публикувани в ЦАИС ЕОП на 07.11.2026 г., съгласно стандарт OCDS' }, now, { max: 10 });
+  assert.deepEqual(first.sources, ['ЦАИС ЕОП', 'data.egov.bg', 'ЦАИС ЕОП']);
+  assert.deepEqual(first.state.notices.map((n) => n.id).sort(), ['401', '402', '403']);
+  assert.equal(first.state.lastDate, '2026-11-10', '11.11 липсва навсякъде и е скорошен: чака се');
+  assert.equal(first.remaining, 3);
+  assert.ok(calls.includes('eop 2026-11-08') && calls.includes('eop 2026-11-09 403'));
+  // Седмица по-късно 11.11 още липсва: пропуска се, за да не спре вносът.
+  days.push({ uri: 'r4', date: '2026-11-13', createdAt: '2026-11-14 08:00:00', releases: [tenderRelease(404)] });
+  const later = await importStep(fetchImpl, first.state, '2026-11-18T07:30:00Z', { max: 10 });
+  assert.equal(later.skipped, 2);
+  assert.equal(later.imported, 1);
+  assert.equal(later.state.lastDate, '2026-11-13');
+  assert.match(later.state.lastResourceName, /на 13\.11\.2026 г\./);
+  assert.ok(!calls.some((c) => c < 'eop 2026-11-08'), 'старото състояние продължава от 08.11, не от 45 дни назад');
 });

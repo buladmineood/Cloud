@@ -1,9 +1,9 @@
 import {
   addressLine, api, confirmDialog, downloadCsv, emptyState, fatal, field, formatDate, formatTime, formDialog, formValues, h, icon, linkBox,
   money, mountShell, norm, num, pageHead, parseNum, pill, round2, selectField, setOrg, showError, showFieldErrors, timeAgo, toast, today,
-} from './core.js?v=3f2e5a7770';
-import { buildPdf, saveFile } from './pdf.js?v=3f2e5a7770';
-import { DEFAULT_COUNTRY, placeAutocomplete } from './places.js?v=3f2e5a7770';
+} from './core.js?v=c0e092ac04';
+import { buildPdf, saveFile } from './pdf.js?v=c0e092ac04';
+import { DEFAULT_COUNTRY, placeAutocomplete } from './places.js?v=c0e092ac04';
 
 let shell;
 let main;
@@ -1722,7 +1722,7 @@ async function viewEopNotices(query) {
           h('h2', { class: 'card__title' }, 'Източник'),
           h('p', { class: 'small' }, res.source, '.'),
           h('p', { class: 'small muted' }, res.importedAt ? `Обновено ${formatTime(res.importedAt)}${res.lastResourceName ? `; последни данни: ${res.lastResourceName.replace(/^.*публикувани в ЦАИС ЕОП /, '').replace(/, съгласно.*$/, '')}` : ''}.` : 'Още не е обновявано.'),
-          h('p', { class: 'small muted' }, 'АОП публикува данните с няколко дни закъснение. Меродавни са обявлението и документацията в ЦАИС ЕОП; офертите се подават само там, с КЕП.')))));
+          h('p', { class: 'small muted' }, 'Данните за всеки ден излизат на следващата сутрин. Меродавни са обявлението и документацията в ЦАИС ЕОП; офертите се подават само там, с КЕП.')))));
 }
 
 // --- БУЛАДМИН: организации, планове, потребители ---

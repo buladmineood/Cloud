@@ -1924,7 +1924,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       if (hit) return hit.json();
     }
     const bytes = await store.downloadPath(EOP_FILE);
-    const state = bytes ? JSON.parse(new TextDecoder().decode(bytes)) : { notices: [], lastResourceAt: '', importedAt: '' };
+    const state = bytes ? JSON.parse(new TextDecoder().decode(bytes)) : { notices: [], lastDate: '', importedAt: '' };
     if (cache) {
       await cache.put(EOP_CACHE_KEY, new Response(JSON.stringify(state), {
         headers: { 'content-type': 'application/json', 'cache-control': 'max-age=1800' },
@@ -2022,7 +2022,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     await store.uploadFile(EOP_FILE, new TextEncoder().encode(JSON.stringify(result.state)), 'application/json');
     await eopCache()?.delete(EOP_CACHE_KEY).catch(() => {});
     // При първия внос (празен файл) не се пращат известия за всички натрупани поръчки.
-    const fresh = previous.lastResourceAt ? result.state.notices.filter((n) => !known.has(n.id)) : [];
+    const fresh = previous.lastDate || previous.lastResourceAt ? result.state.notices.filter((n) => !known.has(n.id)) : [];
     const [orgs, plans] = await Promise.all([store.list('orgs'), loadPlans()]);
     let updated = 0;
     let alerts = 0;
@@ -2036,7 +2036,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
         console.error('eop org failed', org.id, err.message);
       }
     }
-    return { imported: result.imported, remaining: result.remaining, open: result.state.notices.length, new: fresh.length, updated, alerts };
+    return { imported: result.imported, sources: result.sources, remaining: result.remaining, open: result.state.notices.length, new: fresh.length, updated, alerts };
   }
 
   async function applyEopEvents(org, events) {

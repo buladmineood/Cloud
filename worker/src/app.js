@@ -1053,7 +1053,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       taxEventDate: doc.taxEventDate || issueDate,
       companyName: buyer.name,
       buyer: JSON.stringify({
-        name: buyer.name, eik: buyer.eik, vatNumber: buyer.vatNumber, mol: buyer.mol, city: buyer.city, address: buyer.address,
+        name: buyer.name, eik: buyer.eik, vatNumber: buyer.vatNumber, mol: buyer.mol,
+        country: buyer.country, city: buyer.city, postcode: buyer.postcode, region: buyer.region, address: buyer.address,
       }),
       // Доставчикът към момента на издаване, с избраната банкова сметка.
       seller: JSON.stringify(sellerWithAccount(company, doc.bankAccount)),

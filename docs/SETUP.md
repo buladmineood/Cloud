@@ -131,6 +131,17 @@ node scripts/eop-import.mjs
 
 Локално: `DEV_EOP=1 npm run dev` зарежда истинските обявления в демо сървъра.
 
+### Населени места и пощенски кодове
+
+Файловете в `assets/data/places/` (по един на държава, общо около 12 MB) се правят от GeoNames Postal Codes. Обновяват се рядко, например веднъж годишно:
+
+```
+cd worker
+node scripts/build-places.mjs        # всички държави
+node scripts/build-places.mjs BG     # само България
+node scripts/stamp-assets.mjs
+```
+
 ## Ежедневна работа
 
 ### Администратори на БУЛАДМИН („БУЛАДМИН“ в менюто)

@@ -1,6 +1,6 @@
 // Страницата, която клиентът отваря от имейла: преглед на офертата, PDF и отговор „Приемам“ или „Отказвам“.
-import { api, formatDate, formValues, h, icon, money, num, round2, showError, showFieldErrors } from './core.js?v=8fdd9a957d';
-import { buildPdf, saveFile } from './pdf.js?v=8fdd9a957d';
+import { addressLine, api, formatDate, formValues, h, icon, money, num, round2, showError, showFieldErrors } from './core.js?v=3f2e5a7770';
+import { buildPdf, saveFile } from './pdf.js?v=3f2e5a7770';
 
 const root = document.getElementById('offer');
 
@@ -14,7 +14,7 @@ const token = fromLink || read();
 history.replaceState(null, '', location.pathname);
 
 const lineNet = (l) => round2(l.qty * l.price * (1 - (l.discount || 0) / 100));
-const partyLines = (p) => [p.eik && `ЕИК: ${p.eik}`, p.vatNumber && `ДДС №: ${p.vatNumber}`, [p.city, p.address].filter(Boolean).join(', ')].filter(Boolean);
+const partyLines = (p) => [p.eik && `ЕИК: ${p.eik}`, p.vatNumber && `ДДС №: ${p.vatNumber}`, addressLine(p)].filter(Boolean);
 
 function message(kind, title, text) {
   root.replaceChildren(h('section', { class: 'card stack narrow' },

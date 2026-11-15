@@ -34,7 +34,7 @@ export function validateBankAccounts(raw, max) {
 }
 
 export const DEFAULT_COMPANY = {
-  name: '', eik: '', vatNumber: '', mol: '', city: '', address: '', phone: '', email: '',
+  name: '', eik: '', vatNumber: '', mol: '', country: 'България', city: '', postcode: '', region: '', address: '', phone: '', email: '',
   iban: '', bank: '', bic: '', vatRegistered: 'Да', invoiceStart: '1', dueDays: '7', currency: 'EUR',
 };
 

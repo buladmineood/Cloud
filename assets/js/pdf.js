@@ -1,5 +1,6 @@
 // Създава PDF на оферта или фактура в браузъра с pdf-lib и шрифта Onest (кирилица).
 // Библиотеките (около 1,3 MB) се зареждат само при първото създаване на PDF.
+import { addressLine } from './core.js?v=3f2e5a7770';
 
 const NAVY = [16, 41, 76];
 const GOLD = [181, 134, 42];
@@ -65,7 +66,7 @@ function totalsOf(lines, docType) {
 }
 
 const partyLines = (p) => [
-  p.eik && `ЕИК: ${p.eik}`, p.vatNumber && `ДДС №: ${p.vatNumber}`, [p.city, p.address].filter(Boolean).join(', '), p.mol && `МОЛ: ${p.mol}`,
+  p.eik && `ЕИК: ${p.eik}`, p.vatNumber && `ДДС №: ${p.vatNumber}`, addressLine(p), p.mol && `МОЛ: ${p.mol}`,
 ].filter(Boolean);
 
 /**

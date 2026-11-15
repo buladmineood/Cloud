@@ -430,3 +430,9 @@ export function fatal(container, err) {
     h('div', { class: 'alert alert--error', role: 'alert' }, err.message || 'Възникна грешка.'),
     h('p', { style: 'margin-top:12px' }, h('a', { href: '/' }, 'Към входа'))));
 }
+
+// Адрес в един ред: „4000 Пловдив, ул. Примерна 1“; държавата се добавя, ако не е България.
+export function addressLine(p) {
+  const country = p.country && !/^(българия|bg|bulgaria)$/i.test(p.country.trim()) ? p.country : '';
+  return [[p.postcode, p.city].filter(Boolean).join(' '), p.address, country].filter(Boolean).join(', ');
+}

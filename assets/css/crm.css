@@ -230,3 +230,13 @@ fieldset.field > legend { font-weight: 600; margin-bottom: 8px; }
 .eop-filters > input:focus, .eop-filters > select:focus, .eop-alert input:focus { outline: 0; border-color: var(--navy); box-shadow: 0 0 0 3px rgb(181 134 42 / .35); }
 .eop-alert { display: flex; gap: 8px; }
 .eop-alert input { flex: 1; }
+
+/* Подсказки за населено място и пощенски код */
+.place-field { position: relative; }
+.place-list { position: absolute; z-index: 30; left: 0; right: 0; top: 100%; margin: 4px 0 0; padding: 4px; list-style: none; max-height: 290px; overflow-y: auto; background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 10px 28px rgb(16 41 76 / .18); }
+.place-list[hidden] { display: none; }
+.place-list li { display: grid; gap: 1px; padding: 8px 10px; border-radius: 6px; cursor: pointer; }
+.place-list li[aria-selected="true"], .place-list li:hover { background: var(--tint); }
+.place-list__name { font-weight: 600; }
+.place-list__meta { font-size: .82rem; color: var(--ink-2); }
+.place-list li.place-list__src { display: block; padding: 4px 10px 2px; font-size: .72rem; color: var(--ink-2); cursor: default; background: none; }

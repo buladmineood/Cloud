@@ -1,8 +1,9 @@
 import {
-  api, confirmDialog, downloadCsv, emptyState, fatal, field, formatDate, formatTime, formDialog, formValues, h, icon, linkBox,
+  addressLine, api, confirmDialog, downloadCsv, emptyState, fatal, field, formatDate, formatTime, formDialog, formValues, h, icon, linkBox,
   money, mountShell, norm, num, pageHead, parseNum, pill, round2, selectField, setOrg, showError, showFieldErrors, timeAgo, toast, today,
-} from './core.js?v=8fdd9a957d';
-import { buildPdf, saveFile } from './pdf.js?v=8fdd9a957d';
+} from './core.js?v=3f2e5a7770';
+import { buildPdf, saveFile } from './pdf.js?v=3f2e5a7770';
+import { DEFAULT_COUNTRY, placeAutocomplete } from './places.js?v=3f2e5a7770';
 
 let shell;
 let main;
@@ -169,11 +170,13 @@ async function editRecord(entity, record = null, presets = {}) {
   const def = meta.entities[entity];
   const values = { ...presets, ...(record || {}) };
   if (!record && ['companies', 'deals'].includes(entity)) values.owner ??= me.user.email;
+  if (!record && entity === 'companies') values.country ??= DEFAULT_COUNTRY;
   if (!record && entity === 'activities') {
     values.assignedTo ??= me.user.email;
     values.dueDate ??= today();
   }
   const fields = h('div', { class: 'form__grid' }, def.columns.filter((c) => !c.system && refAllowed(c)).map((c) => inputFor(entity, c, values[c.name])));
+  placeAutocomplete(fields);
   const saved = await formDialog({
     title: record ? `${def.single}: промяна` : `Нов запис: ${def.single.toLowerCase()}`,
     fields,
@@ -1002,7 +1005,7 @@ function documentEditor(doc, query) {
 }
 
 const partyLines = (p) => [
-  p.eik && `ЕИК: ${p.eik}`, p.vatNumber && `ДДС №: ${p.vatNumber}`, [p.city, p.address].filter(Boolean).join(', '), p.mol && `МОЛ: ${p.mol}`,
+  p.eik && `ЕИК: ${p.eik}`, p.vatNumber && `ДДС №: ${p.vatNumber}`, addressLine(p), p.mol && `МОЛ: ${p.mol}`,
 ].filter(Boolean);
 
 // Издаденият документ пази данните на страните към момента на издаване; черновата показва текущите.
@@ -1508,7 +1511,9 @@ function viewSettings() {
       f('name', 'Наименование', { wrapClass: 'full' }), f('eik', 'ЕИК', { inputmode: 'numeric' }),
       selectField({ name: 'vatRegistered', label: 'Регистрирана по ДДС', options: ['Да', 'Не'], value: c.vatRegistered }),
       f('vatNumber', 'ДДС номер', { placeholder: 'BG123456789' }), f('mol', 'МОЛ'),
-      f('city', 'Населено място'), f('address', 'Адрес'),
+      f('country', 'Държава'), f('city', 'Населено място', { hint: 'започнете да пишете' }),
+      f('postcode', 'Пощенски код', { inputmode: 'numeric' }), f('region', 'Област / регион'),
+      f('address', 'Адрес', { wrapClass: 'full' }),
       f('phone', 'Телефон', { type: 'tel' }), f('email', 'Имейл', { type: 'email', hint: 'на него идват отговорите на клиентите' })),
     accounts.el,
     h('h2', {}, 'Номерация и срокове'),
@@ -1518,6 +1523,7 @@ function viewSettings() {
     h('p', { class: 'small muted' }, `Основна валута: EUR${data.plan.allowCurrencies === 'Да' ? '; документите могат да са и в друга валута с курс на ЕЦБ' : ''}. Фактурите и кредитните известия са с обща поредица от 10 цифри. Офертите и проформите са с номер OF-/PF-година-пореден.`),
     alert,
     h('div', {}, h('button', { class: 'btn', type: 'submit' }, 'Запазете')));
+  placeAutocomplete(form);
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     alert.replaceChildren();
@@ -1572,11 +1578,15 @@ function companyForm(options, onCreated) {
       selectField({ name: 'vatRegistered', label: 'Регистрирана по ДДС', options: ['Не', 'Да'], value: 'Не' }),
       field({ name: 'vatNumber', label: 'ДДС номер', hint: 'ако е регистрирана', placeholder: 'BG123456789', maxlength: 12 }),
       field({ name: 'mol', label: 'МОЛ', hint: 'по желание', maxlength: 120 }),
-      field({ name: 'city', label: 'Населено място', maxlength: 120 }),
-      field({ name: 'address', label: 'Адрес', maxlength: 255 })),
+      field({ name: 'country', label: 'Държава', value: DEFAULT_COUNTRY, maxlength: 120 }),
+      field({ name: 'city', label: 'Населено място', hint: 'започнете да пишете', maxlength: 120 }),
+      field({ name: 'postcode', label: 'Пощенски код', inputmode: 'numeric', maxlength: 20 }),
+      field({ name: 'region', label: 'Област / регион', maxlength: 120 }),
+      field({ name: 'address', label: 'Адрес', maxlength: 255, wrapClass: 'full' })),
     planBlock,
     alert,
     h('div', {}, h('button', { class: 'btn', type: 'submit' }, options.freeAllowed || options.platform ? 'Регистрирайте фирмата' : 'Регистрирайте и поискайте абонамент')));
+  placeAutocomplete(form);
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     alert.replaceChildren();
@@ -1828,7 +1838,7 @@ async function viewPlatformOrg(id) {
         dbCard(o),
         h('section', { class: 'card' }, h('h2', { class: 'card__title' }, 'Данни на фирмата'),
           h('dl', { class: 'details details--stacked' },
-            [['ДДС', o.vatRegistered === 'Да' ? o.vatNumber : 'не е регистрирана'], ['МОЛ', o.mol], ['Адрес', [o.city, o.address].filter(Boolean).join(', ')], ['Телефон', o.phone], ['Имейл', o.email]]
+            [['ДДС', o.vatRegistered === 'Да' ? o.vatNumber : 'не е регистрирана'], ['МОЛ', o.mol], ['Адрес', addressLine(o)], ['Телефон', o.phone], ['Имейл', o.email]]
               .filter(([, v]) => v).flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]))),
         await historyCardFor('orgs', id))));
 }

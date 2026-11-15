@@ -1,4 +1,4 @@
-import { api, h, showError, showFieldErrors } from './core.js?v=acbd99f011';
+import { api, h, showError, showFieldErrors } from './core.js?v=c6c5e2e1e0';
 
 const form = document.getElementById('login-form');
 const alert = document.getElementById('form-alert');

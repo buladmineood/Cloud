@@ -1,12 +1,13 @@
 // Създава PDF на оферта или фактура в браузъра с pdf-lib и шрифта Onest (кирилица).
 // Библиотеките (около 1,3 MB) се зареждат само при първото създаване на PDF.
-import { addressLine } from './core.js?v=acbd99f011';
+import { addressLine } from './core.js?v=c6c5e2e1e0';
 
 const NAVY = [16, 41, 76];
 const GOLD = [181, 134, 42];
 const INK2 = [74, 90, 115];
 const LINE = [220, 215, 203];
 const TINT = [243, 239, 230];
+const RED = [178, 34, 34];
 const A4 = [595.28, 841.89];
 const M = 40;
 const FOOTER = 'Създадено с BulAdmin Cloud · cloud.buladmin.eu';
@@ -144,7 +145,9 @@ export async function buildPdf({ doc, seller, buyer, logo, related, issuedBy }) 
   }
   draw(doc.docType.toUpperCase(), A4[0] - M, y - 18, { size: 20, f: fontBold, align: 'right' });
   draw(doc.number ? `№ ${doc.number}` : 'ЧЕРНОВА', A4[0] - M, y - 34, { size: 12, f: fontBold, align: 'right' });
-  if (TAX.includes(doc.docType) && doc.number) draw('ОРИГИНАЛ', A4[0] - M, y - 47, { size: 8, c: INK2, align: 'right' });
+  const cancelled = doc.docStatus === 'Анулиран';
+  if (cancelled) draw('АНУЛИРАН', A4[0] - M, y - 48, { size: 10, f: fontBold, c: RED, align: 'right' });
+  else if (TAX.includes(doc.docType) && doc.number) draw('ОРИГИНАЛ', A4[0] - M, y - 47, { size: 8, c: INK2, align: 'right' });
   y = headerBottom - 6;
   hline(y, GOLD, 2);
   y -= 18;
@@ -253,9 +256,21 @@ export async function buildPdf({ doc, seller, buyer, logo, related, issuedBy }) 
   const pages = pdf.getPages();
   pages.forEach((p, i) => {
     page = p;
+    // Анулираният документ се тегли със следа през цялата страница, за да не се ползва като валиден.
+    if (cancelled) {
+      const text = 'АНУЛИРАН';
+      const size = 92;
+      const w = width(text, size, fontBold);
+      const angle = Math.PI / 5;
+      page.drawText(text, {
+        x: A4[0] / 2 - (w / 2) * Math.cos(angle), y: A4[1] / 2 - (w / 2) * Math.sin(angle),
+        size, font: fontBold, color: color(RED), opacity: 0.16, rotate: PDFLib.degrees(36),
+      });
+      draw(`Документът е анулиран${doc.cancelledAt ? ` на ${date(doc.cancelledAt.slice(0, 10))}` : ''} и не е валиден.`, M, 56, { size: 8, f: fontBold, c: RED });
+    }
     hline(46, LINE, 0.6);
     draw(FOOTER, M, 32, { size: 7.5, c: INK2 });
-    draw(`${doc.docType} ${doc.number || ''} · страница ${i + 1} от ${pages.length}`, A4[0] - M, 32, { size: 7.5, c: INK2, align: 'right' });
+    draw(`${doc.docType} ${doc.number || ''}${cancelled ? ' · АНУЛИРАН' : ''} · страница ${i + 1} от ${pages.length}`, A4[0] - M, 32, { size: 7.5, c: cancelled ? RED : INK2, align: 'right' });
   });
   return pdf.save();
 }
@@ -435,18 +450,27 @@ export async function buildLetter(spec) {
     }
   }
 
-  // Дата, място и подписи.
+  // Дата, място и подписи. Място за подпис (линия) има само при signLines: протоколи на органи, договори,
+  // пълномощни. Счетоводните документи са без подпис и печат (не са задължителни реквизити по ЗСч), а
+  // документите по ЗОП се подписват с КЕП — при тях се изписват само имената.
   const signs = spec.signatures || [];
   const perRow = Math.min(signs.length, 3) || 1;
-  need(40 + Math.ceil(signs.length / 3) * 72);
+  need(40 + (spec.signLines ? Math.ceil(signs.length / 3) * 72 : signs.length * 14));
   y -= 6;
   if (spec.dateLine !== false && (spec.date !== undefined || spec.place)) {
     draw(`Дата: ${date(spec.date) || '……………………'}`, M, y, { size: 10 });
     if (spec.place) draw(`гр./с. ${spec.place}`, M, y - 14, { size: 10 });
-    y -= 40;
+    y -= spec.signLines ? 40 : 34;
   }
   const colW = W / perRow;
-  signs.forEach((s, i) => {
+  if (!spec.signLines) {
+    for (const s of signs.filter((x) => x.name || x.role)) {
+      draw(`${s.label}: `, M, y, { size: 9.5, c: INK2 });
+      draw([s.name, s.role].filter(Boolean).join(', '), M + width(`${s.label}: `, 9.5) + 2, y, { size: 9.5, f: fontBold });
+      y -= 14;
+    }
+  }
+  if (spec.signLines) signs.forEach((s, i) => {
     const x = signs.length === 1 ? M + W * 0.55 : M + (i % 3) * colW;
     const yy = y - Math.floor(i / 3) * 72;
     const lineW = signs.length === 1 ? W * 0.45 : colW - 16;

@@ -114,3 +114,13 @@ test('поредица на касовите ордери по години', ()
   assert.equal(nextCashOrder(payments, 'РКО', '2026'), 'РКО-2026-0004');
   assert.equal(nextCashOrder(payments, 'ПКО', '2027'), 'ПКО-2027-0001');
 });
+
+test('анулиран документ пази датата на анулиране (за отбелязване в PDF)', async () => {
+  const { call } = setup();
+  const invoice = await issue(call, { docType: 'Фактура', lines: LINES });
+  const cancelled = await call('POST', `/api/documents/${invoice.data.id}/cancel`, { as: 'admin@x.bg' });
+  assert.equal(cancelled.data.docStatus, 'Анулиран');
+  assert.equal(cancelled.data.cancelledAt, '2026-11-14T10:00:00Z');
+  const again = (await call('GET', '/api/data', { as: 'user@x.bg' })).data.documents.find((d) => d.id === invoice.data.id);
+  assert.equal(again.cancelledAt, '2026-11-14T10:00:00Z');
+});

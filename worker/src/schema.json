@@ -313,6 +313,7 @@
       { "name": "createdBy", "label": "Създал", "kind": "text" },
       { "name": "issuedBy", "label": "Съставил", "kind": "text" },
       { "name": "issuedAt", "label": "Издаден на", "kind": "date" },
+      { "name": "cancelledAt", "label": "Анулиран на", "kind": "text", "system": true },
       { "name": "createdAt", "label": "Създаден", "kind": "date" },
       { "name": "updatedAt", "label": "Обновен", "kind": "date" }
     ]

@@ -1113,10 +1113,11 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (doc.docStatus === 'Чернова' || doc.docStatus === 'Анулиран') throw new HttpError(409, 'Документът не е издаден.');
     if (Number(doc.paidAmount) > 0) throw new HttpError(409, 'Документът има плащания. Първо ги изтрийте или издайте кредитно известие.');
     if (TAX_DOCS.includes(doc.docType) && ctx.role !== ADMIN) throw new HttpError(403, 'Фактури и известия се анулират само от администратор.');
-    await ctx.db.update('documents', id, { docStatus: 'Анулиран', updatedAt: nowIso() });
+    const cancelledAt = nowIso();
+    await ctx.db.update('documents', id, { docStatus: 'Анулиран', cancelledAt, updatedAt: cancelledAt });
     if (doc.docStatus === 'Издаден') await moveStock(ctx, doc, -1);
     await audit(ctx, 'documents', id, 'Анулиран');
-    return json(publicDocument({ ...doc, docStatus: 'Анулиран' }));
+    return json(publicDocument({ ...doc, docStatus: 'Анулиран', cancelledAt }));
   }
 
   // Нова чернова от съществуващ документ: оферта → проформа/фактура, фактура → кредитно известие.

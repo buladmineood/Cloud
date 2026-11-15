@@ -1,10 +1,11 @@
 import {
   addressLine, api, confirmDialog, downloadCsv, emptyState, fatal, field, formatDate, formatTime, formDialog, formValues, h, icon, linkBox,
   money, mountShell, norm, num, pageHead, parseNum, pill, round2, selectField, setOrg, showError, showFieldErrors, timeAgo, toast, today,
-} from './core.js?v=acbd99f011';
-import { buildPdf, saveFile } from './pdf.js?v=acbd99f011';
-import { balanceConfirmation, cashOrder, handoverProtocol, paymentReminder, ZOP_DOCS, zopDocument } from './letters.js?v=acbd99f011';
-import { DEFAULT_COUNTRY, placeAutocomplete } from './places.js?v=acbd99f011';
+} from './core.js?v=c6c5e2e1e0';
+import { buildPdf, saveFile } from './pdf.js?v=c6c5e2e1e0';
+import { FORM_GROUPS } from './forms.js?v=c6c5e2e1e0';
+import { balanceConfirmation, cashOrder, handoverProtocol, paymentReminder, ZOP_DOCS, ZOP_NOTE, zopDocument } from './letters.js?v=c6c5e2e1e0';
+import { DEFAULT_COUNTRY, placeAutocomplete } from './places.js?v=c6c5e2e1e0';
 
 let shell;
 let main;
@@ -229,7 +230,7 @@ const unpaid = () => data.documents.filter((d) => d.docType === 'Фактура'
 // По кредитно известие сумата е с минус: остатъкът (за връщане) е по абсолютна стойност.
 const outstanding = (d) => round2(Math.abs(d.total) - d.paidAmount);
 // Данни за документите, които се създават само като PDF (letters.js).
-const letterEnv = () => ({ company: data.company, companies: data.companies, documents: data.documents, payments: data.payments, find, logo: logoBytes });
+const letterEnv = () => ({ company: data.company, companies: data.companies, documents: data.documents, payments: data.payments, products: data.products, find, logo: logoBytes, userName: me.user.name });
 const PROTOCOL = 'Протокол по чл. 117';
 const PAYABLE = ['Фактура', 'Проформа фактура', 'Дебитно известие'];
 // Равностойност в евро: сумите в документи в чужда валута се превръщат по курса на документа.
@@ -639,7 +640,7 @@ function tenderSections(record, content, side) {
   };
   side.unshift(h('section', { class: 'card stack-tight' },
     h('h2', { class: 'card__title' }, 'Документи по ЗОП (PDF)'),
-    h('p', { class: 'small muted' }, 'Проекти с данните на фирмата и поръчката. Ако възложителят има образец, ползвайте него. Подписват се с КЕП и се подават в ЦАИС ЕОП.'),
+    h('p', { class: 'notice small' }, ZOP_NOTE),
     h('div', { class: 'zop-docs' }, ZOP_DOCS.map((d) => h('button', {
       class: 'zop-doc', type: 'button', onclick: () => zopDocument(d.key, record, letterEnv()).catch(() => {}),
     }, h('span', { class: 'zop-doc__title' }, d.title), h('span', { class: 'zop-doc__hint' }, d.hint))))));
@@ -1097,7 +1098,8 @@ function documentPrint(doc) {
   const buyer = buyerOf(doc);
   const t = totalsOf(doc.lines, doc.docType);
   const related = doc.relatedId && find('documents', doc.relatedId);
-  return h('article', { class: 'doc-print', 'aria-label': `${doc.docType} ${doc.number}` },
+  return h('article', { class: `doc-print${doc.docStatus === 'Анулиран' ? ' doc-print--cancelled' : ''}`, 'aria-label': `${doc.docType} ${doc.number}` },
+    doc.docStatus === 'Анулиран' && h('p', { class: 'doc-print__cancelled' }, `АНУЛИРАН${doc.cancelledAt ? ` на ${formatDate(doc.cancelledAt.slice(0, 10))}` : ''} — документът не е валиден`),
     showLogo() && h('img', { class: 'doc-print__logo', src: logoSrc(), alt: seller.name || 'Лого' }),
     h('header', { class: 'doc-print__head' },
       h('div', {},
@@ -1312,6 +1314,72 @@ function viewPayments() {
         h('td', { 'data-label': 'Начин' }, p.method),
         h('td', { 'data-label': 'Основание' }, p.reference),
         h('td', { 'data-label': 'Касов ордер' }, p.cashOrder && h('button', { class: 'link-btn', type: 'button', title: 'Изтеглете касовия ордер (PDF)', onclick: () => cashOrder(p, letterEnv()).catch(() => {}) }, p.cashOrder))))))) : emptyState('wallet', 'Няма плащания', 'Плащанията се отбелязват от страницата на издадена фактура.'));
+}
+
+// --- Документи и бланки: всички документи на едно място ---
+
+// Избор на запис преди създаването на документ (контрагент, документ, плащане, поръчка).
+async function pick(title, label, options, empty) {
+  if (!options.length) { toast(empty, 'error'); return null; }
+  const result = await formDialog({ title, fields: [selectField({ name: 'id', label, options, wrapClass: 'full' })], submitLabel: 'Напред' });
+  return result?.id || null;
+}
+const pickCompany = (title) => pick(title, 'Контрагент', [...data.companies].sort((a, b) => a.name.localeCompare(b.name, 'bg')).map((c) => [c.id, c.name]), 'Няма контрагенти.');
+const docOption = (d) => [d.id, `${d.docType} № ${d.number} от ${formatDate(d.issueDate)} · ${d.companyName}${d.docStatus === 'Анулиран' ? ' · АНУЛИРАН' : ''}`];
+const issued = (types) => data.documents.filter((d) => d.number && types.includes(d.docType)).sort((a, b) => b.issueDate.localeCompare(a.issueDate));
+
+function formGroups() {
+  const env = letterEnv();
+  const link = (hash) => () => { location.hash = hash; };
+  const accounting = {
+    key: 'tax', title: 'Счетоводни документи (ЗДДС и ЗСч)',
+    note: 'Подписът и печатът не са задължителни реквизити на счетоводните документи, затова те са без места за подпис и печат. Издадените документи се пазят в системата; PDF се създава наново при всяко теглене, а анулираните се отбелязват като анулирани.',
+    items: [
+      canEdit() && { title: 'Фактура', hint: 'нова фактура, вкл. авансова', run: link('#/documents/new?type=Фактура') },
+      canEdit() && { title: 'Проформа фактура', hint: 'нова проформа', run: link(`#/documents/new?type=${encodeURIComponent('Проформа фактура')}`) },
+      canEdit() && { title: 'Оферта', hint: 'нова оферта с линк за приемане', run: link('#/documents/new?type=Оферта') },
+      canEdit() && { title: 'Кредитно или дебитно известие', hint: 'чл. 115 ЗДДС, към издадена фактура', run: async () => { const id = await pick('Известие към фактура', 'Фактура', issued(['Фактура']).filter((d) => d.docStatus === 'Издаден').map(docOption), 'Няма издадени фактури.'); if (id) location.hash = `#/documents/${id}`; } },
+      canEdit() && data.company.vatRegistered === 'Да' && { title: 'Протокол по чл. 117 ЗДДС', hint: 'самоначисляване при покупка от чужбина', run: link(`#/documents/new?type=${encodeURIComponent(PROTOCOL)}`) },
+      { title: 'Касов ордер (ПКО / РКО)', hint: 'за плащане в брой', run: async () => { const id = await pick('Касов ордер', 'Плащане', data.payments.filter((p) => p.cashOrder).sort((a, b) => b.paidAt.localeCompare(a.paidAt)).map((p) => [p.id, `${p.cashOrder} · ${formatDate(p.paidAt)} · ${money(p.amount, find('documents', p.documentId)?.currency)}`]), 'Няма плащания в брой. Касовият ордер се създава при плащане в брой по фактура.'); if (id) await cashOrder(find('payments', id), env); } },
+      { title: 'Приемо-предавателен протокол', hint: 'към фактура, проформа или оферта', run: async () => { const id = await pick('Приемо-предавателен протокол', 'Документ', issued(['Фактура', 'Проформа фактура', 'Оферта']).filter((d) => d.docStatus !== 'Анулиран' && d.advance !== 'Да').map(docOption), 'Няма издадени документи.'); if (id) await handoverProtocol(find('documents', id), env); } },
+      { title: 'Потвърждение на салдо', hint: 'към дата, с място за отговор', run: async () => { const id = await pickCompany('Потвърждение на салдо'); if (id) await balanceConfirmation(find('companies', id), env); } },
+      { title: 'Покана за доброволно плащане', hint: 'за просрочените документи', run: async () => { const id = await pickCompany('Покана за плащане'); if (id) await paymentReminder(find('companies', id), env); } },
+    ].filter(Boolean),
+  };
+  const zop = sectionAllowed('tenders') && {
+    key: 'zop', title: 'Обществени поръчки (ЗОП)', note: ZOP_NOTE,
+    items: ZOP_DOCS.map((d) => ({ title: d.title, hint: d.hint, run: async () => {
+      const id = await pick(d.title, 'Обществена поръчка', [...data.tenders].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map((x) => [x.id, x.tenderName]), 'Няма обществени поръчки. Добавете от „ЦАИС ЕОП“.');
+      if (id) await zopDocument(d.key, find('tenders', id), env);
+    } })),
+  };
+  return [accounting, zop, ...FORM_GROUPS.map((g) => ({ ...g, items: g.items.map((i) => ({ ...i, run: () => i.run(env) })) }))].filter(Boolean);
+}
+
+function viewForms(query) {
+  const groups = formGroups();
+  const state = { q: query.get('q') || '' };
+  const results = h('div', { class: 'stack' });
+  const render = () => {
+    const q = norm(state.q);
+    const shown = groups.map((g) => ({ ...g, items: g.items.filter((i) => !q || norm(`${g.title} ${i.title} ${i.hint}`).includes(q)) })).filter((g) => g.items.length);
+    fill(results, shown.length ? shown.map((g) => h('section', { class: 'card stack-tight', id: `forms-${g.key}` },
+      h('h2', { class: 'card__title' }, g.title),
+      g.note && h('p', { class: 'notice small' }, g.note),
+      h('div', { class: 'forms-grid' }, g.items.map((i) => h('button', {
+        class: 'zop-doc', type: 'button', onclick: () => Promise.resolve(i.run()).catch(() => {}),
+      }, h('span', { class: 'zop-doc__title' }, i.title), h('span', { class: 'zop-doc__hint' }, i.hint)))))) : emptyState('search', 'Няма такъв документ', 'Опитайте с друга дума.'));
+  };
+  const search = h('label', { class: 'search' }, icon('search', 18), h('input', {
+    type: 'search', value: state.q, placeholder: 'Търсете документ: фактура, протокол, декларация…', 'aria-label': 'Търсене на документ',
+    oninput: (e) => { state.q = e.target.value; render(); },
+  }));
+  page(
+    pageHead('Документи и бланки', 'Всички документи, които системата създава като PDF: счетоводни, по ЗОП, по ТЗ, по ЗЮЛНЦ и за счетоводители.'),
+    h('div', { class: 'toolbar' }, search,
+      h('div', { class: 'chips' }, groups.map((g) => h('a', { class: 'chip', href: `#/forms`, onclick: (e) => { e.preventDefault(); document.getElementById(`forms-${g.key}`)?.scrollIntoView({ behavior: 'smooth' }); } }, g.title)))),
+    results);
+  render();
 }
 
 // --- Профил ---
@@ -2110,6 +2178,7 @@ function nav() {
     data && { group: 'ERP' },
     data && { key: 'documents', href: '#/documents', label: 'Оферти и фактури', icon: 'doc', match: /^\/documents/ },
     data && { key: 'payments', href: '#/payments', label: 'Плащания', icon: 'wallet', match: /^\/payments/ },
+    data && { key: 'forms', href: '#/forms', label: 'Документи и бланки', icon: 'list', match: /^\/forms/ },
     data && { key: 'products', href: '#/products', label: 'Артикули', icon: 'box', match: /^\/products/ },
     isAdmin() && { group: 'Организация' },
     isAdmin() && { key: 'users', href: '#/users', label: 'Потребители', icon: 'team', match: /^\/users/ },
@@ -2150,6 +2219,7 @@ async function route() {
     if (!section) return viewDashboard();
     if (section === 'documents') return id ? await viewDocument(id, query) : viewDocuments(query);
     if (section === 'payments') return viewPayments();
+    if (section === 'forms') return viewForms(query);
     if (section === 'deals' && !id) return viewDeals(query);
     if (section === 'activities' && !id) return viewActivities();
     if (section === 'users' && isAdmin()) return viewUsers();

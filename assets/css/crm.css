@@ -256,3 +256,12 @@ fieldset.field > legend { font-weight: 600; margin-bottom: 8px; }
   .plan .details { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; }
   .plan .details dt { margin-top: 0; font-size: inherit; }
 }
+
+/* Анулиран документ */
+.doc-print--cancelled { position: relative; }
+.doc-print__cancelled { margin: 0 0 12px; padding: 8px 12px; border: 2px solid #b22222; border-radius: 8px; color: #b22222; font-weight: 700; text-align: center; letter-spacing: .04em; }
+
+/* Документи и бланки */
+.forms-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+.notice { margin: 0; padding: 10px 12px; border-left: 3px solid var(--gold); border-radius: 6px; background: var(--tint); color: var(--ink); }
+a.chip { text-decoration: none; }

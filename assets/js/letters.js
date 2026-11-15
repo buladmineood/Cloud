@@ -4,26 +4,29 @@
 //  • по ЗСч — приемо-предавателен протокол, потвърждение на салдо, покана за плащане, касови ордери.
 // Документите по ЗОП са проекти: ако възложителят е дал образец, се ползва неговият. Подписват се с КЕП
 // и се подават само в ЦАИС ЕОП.
-import { addressLine, amountWords, field, formatDate, formDialog, h, money, round2, selectField, today, toast } from './core.js?v=acbd99f011';
-import { buildLetter, saveFile } from './pdf.js?v=acbd99f011';
+import { addressLine, amountWords, field, formatDate, formDialog, h, money, round2, selectField, today, toast } from './core.js?v=c6c5e2e1e0';
+import { buildLetter, saveFile } from './pdf.js?v=c6c5e2e1e0';
 
-const ZOP_NOTE = 'Проект, създаден от данните в BulAdmin Cloud. Ако възложителят е предоставил образец, използвайте неговия. Документите се подписват с КЕП и се подават само в ЦАИС ЕОП.';
+// Указанията къде и как се подават документите се показват в портала, а не в самите документи.
+export const ZOP_NOTE = 'Проект с данните на фирмата и поръчката. Ако възложителят е предоставил образец, използвайте неговия. Документите се подписват с КЕП и се подават само в ЦАИС ЕОП (app.eop.bg).';
+// Диалог за документ по ЗОП: указанието е най-отгоре в портала.
+const zopDialog = (opts) => formDialog({ ...opts, fields: [h('p', { class: 'notice small' }, ZOP_NOTE), ...[opts.fields].flat()] });
 const safeName = (s) => String(s).replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
 
-const textarea = (name, label, { value = '', rows = 4, hint, required } = {}) => h('div', { class: 'field full' },
+export const textarea = (name, label, { value = '', rows = 4, hint, required } = {}) => h('div', { class: 'field full' },
   h('label', { for: `f-${name}` }, label, hint && h('span', { class: 'field__hint' }, ` (${hint})`)),
   h('textarea', { id: `f-${name}`, name, rows, maxlength: 8000, required }, value));
-const checkbox = (name, label, checked = false) => h('div', { class: 'field full' }, h('label', { class: 'check' }, h('input', { type: 'checkbox', name, checked }), h('span', {}, label)));
-const grid = (...children) => h('div', { class: 'form__grid' }, children);
-const lines = (text) => String(text || '').split('\n').map((s) => s.trim()).filter(Boolean);
+export const checkbox = (name, label, checked = false) => h('div', { class: 'field full' }, h('label', { class: 'check' }, h('input', { type: 'checkbox', name, checked }), h('span', {}, label)));
+export const grid = (...children) => h('div', { class: 'form__grid' }, children);
+export const lines = (text) => String(text || '').split('\n').map((s) => s.trim()).filter(Boolean);
 
-function required(values, names) {
+export function required(values, names) {
   const fields = {};
   for (const [name, message] of Object.entries(names)) if (!String(values[name] || '').trim()) fields[name] = message || 'Задължително поле.';
   if (Object.keys(fields).length) throw Object.assign(new Error('Попълнете задължителните полета.'), { fields });
 }
 
-async function download(spec, filename) {
+export async function download(spec, filename) {
   try {
     saveFile(await buildLetter(spec), `${safeName(filename)}.pdf`);
     return true;
@@ -33,11 +36,11 @@ async function download(spec, filename) {
   }
 }
 
-const signerFields = (company, label = 'Подписва') => [
+export const signerFields = (company, label = 'Подписва') => [
   field({ name: 'signer', label, value: company.mol || '', maxlength: 120 }),
   field({ name: 'role', label: 'В качеството на', value: 'управител', maxlength: 120 }),
 ];
-const declarant = (v, c) => `Долуподписаният/ата ${v.signer}, в качеството си на ${v.role} на ${c.name}, ЕИК ${c.eik || "—"}${addressLine(c) ? `, със седалище и адрес на управление: ${addressLine(c)}` : ''}`;
+export const declarant = (v, c) => `Долуподписаният/ата ${v.signer}, в качеството си на ${v.role} на ${c.name}, ЕИК ${c.eik || "—"}${addressLine(c) ? `, със седалище и адрес на управление: ${addressLine(c)}` : ''}`;
 const signature = (v, label = 'Подпис') => [{ label, name: v.signer, role: v.role }];
 
 // ============================ ЗОП ============================
@@ -72,7 +75,7 @@ const ZOP_BUILDERS = {
   async price(t, env, z) {
     const c = z.company;
     const offers = env.documents.filter((d) => d.docType === 'Оферта' && d.docStatus !== 'Анулиран' && (d.companyId === t.companyId || (t.dealId && d.dealId === t.dealId)));
-    const v = await formDialog({
+    const v = await zopDialog({
       title: 'Ценово предложение',
       wide: true,
       fields: [grid(
@@ -110,7 +113,7 @@ const ZOP_BUILDERS = {
               'До сключването на договор това предложение заедно с решението на възложителя за определяне на изпълнител има силата на споразумение между нас.',
             ] },
           ],
-          date: today(), place: c.city, signatures: signature(values), note: ZOP_NOTE,
+          date: today(), place: c.city, signatures: signature(values),
         }, `Ценово предложение - ${t.tenderName}`);
       },
     });
@@ -120,7 +123,7 @@ const ZOP_BUILDERS = {
   async technical(t, env, z) {
     const c = z.company;
     const days = t.validUntil && t.submissionDeadline ? Math.max(0, Math.round((Date.parse(t.validUntil) - Date.parse(String(t.submissionDeadline).slice(0, 10))) / 864e5)) : '';
-    return formDialog({
+    return zopDialog({
       title: 'Техническо предложение',
       wide: true,
       fields: [grid(
@@ -155,7 +158,7 @@ const ZOP_BUILDERS = {
               'запознати сме със съдържанието на документацията и нямаме възражения по нея.',
             ], numbered: false },
           ],
-          date: today(), place: c.city, signatures: signature(v), note: ZOP_NOTE,
+          date: today(), place: c.city, signatures: signature(v),
         }, `Техническо предложение - ${t.tenderName}`);
       },
     });
@@ -163,7 +166,7 @@ const ZOP_BUILDERS = {
 
   async confidential(t, env, z) {
     const c = z.company;
-    return formDialog({
+    return zopDialog({
       title: 'Декларация за конфиденциалност (чл. 102 ЗОП)',
       wide: true,
       fields: [grid(
@@ -186,7 +189,7 @@ const ZOP_BUILDERS = {
             ] },
             { p: 'Известна ми е отговорността по чл. 313 от Наказателния кодекс за посочване на неверни данни.', muted: true },
           ],
-          date: today(), place: c.city, signatures: signature(v, 'Декларатор'), note: ZOP_NOTE,
+          date: today(), place: c.city, signatures: signature(v, 'Декларатор'),
         }, `Декларация чл. 102 ЗОП - ${t.tenderName}`);
       },
     });
@@ -194,7 +197,7 @@ const ZOP_BUILDERS = {
 
   async offshore(t, env, z) {
     const c = z.company;
-    return formDialog({
+    return zopDialog({
       title: 'Декларация по ЗИФОДРЮПДРСЛ',
       wide: true,
       fields: [grid(
@@ -226,7 +229,7 @@ const ZOP_BUILDERS = {
             { p: 'Задължавам се при промяна на декларираните обстоятелства да уведомя възложителя в 7-дневен срок от настъпването ѝ.' },
             { p: 'Известна ми е отговорността по чл. 313 от Наказателния кодекс за посочване на неверни данни.', muted: true },
           ],
-          date: today(), place: c.city, signatures: signature(v, 'Декларатор'), note: ZOP_NOTE,
+          date: today(), place: c.city, signatures: signature(v, 'Декларатор'),
         }, `Декларация ЗИФОДРЮПДРСЛ - ${t.tenderName}`);
       },
     });
@@ -234,7 +237,7 @@ const ZOP_BUILDERS = {
 
   async owners(t, env, z) {
     const c = z.company;
-    return formDialog({
+    return zopDialog({
       title: 'Декларация за действителните собственици (ЗМИП)',
       wide: true,
       fields: [grid(
@@ -254,7 +257,7 @@ const ZOP_BUILDERS = {
             { p: 'Данните за действителните собственици са вписани в съответния регистър по чл. 63 от ЗМИП.' },
             { p: 'Известна ми е отговорността по чл. 313 от Наказателния кодекс за посочване на неверни данни.', muted: true },
           ],
-          date: today(), place: c.city, signatures: signature(v, 'Декларатор'), note: ZOP_NOTE,
+          date: today(), place: c.city, signatures: signature(v, 'Декларатор'),
         }, `Декларация ЗМИП - ${t.tenderName}`);
       },
     });
@@ -263,7 +266,7 @@ const ZOP_BUILDERS = {
   async inventory(t, env, z) {
     const c = z.company;
     const items = (t.checklist || []).filter((i) => i.state !== 'Неприложим');
-    return formDialog({
+    return zopDialog({
       title: 'Опис на представените документи',
       wide: true,
       fields: [grid(
@@ -281,7 +284,7 @@ const ZOP_BUILDERS = {
           blocks: [
             { table: { cols: [{ label: '№', w: 6 }, { label: 'Документ', w: 64 }, { label: 'Забележка', w: 30 }], rows: rows.map((i, n) => [n + 1, i.label, i.note || '']) } },
           ],
-          date: today(), place: c.city, signatures: signature(v), note: ZOP_NOTE,
+          date: today(), place: c.city, signatures: signature(v),
         }, `Опис - ${t.tenderName}`);
       },
     });
@@ -290,7 +293,7 @@ const ZOP_BUILDERS = {
   async clarify(t, env, z) {
     const c = z.company;
     const late = t.questionsDeadline && t.questionsDeadline < new Date().toISOString();
-    return formDialog({
+    return zopDialog({
       title: 'Искане за разяснения (чл. 33 ЗОП)',
       wide: true,
       fields: [grid(
@@ -310,7 +313,7 @@ const ZOP_BUILDERS = {
             { list: lines(v.questions) },
             { p: 'Благодарим предварително.' },
           ],
-          date: today(), place: c.city, signatures: signature(v), note: ZOP_NOTE,
+          date: today(), place: c.city, signatures: signature(v),
         }, `Искане за разяснения - ${t.tenderName}`);
       },
     });
@@ -325,7 +328,7 @@ const ZOP_BUILDERS = {
       ['r4', 'спазване на задълженията по чл. 115 от ЗОП (т. 4)'],
       ['r5', 'възможност участникът да получи държавна помощ (т. 5)'],
     ];
-    return formDialog({
+    return zopDialog({
       title: 'Обосновка по чл. 72 ЗОП',
       wide: true,
       fields: [grid(
@@ -349,7 +352,7 @@ const ZOP_BUILDERS = {
             { p: v.explanation },
             { p: 'Предложението ни гарантира качествено и срочно изпълнение на поръчката при спазване на приложимите правила за опазване на околната среда, социалното и трудовото право.' },
           ],
-          date: today(), place: c.city, signatures: signature(v), note: ZOP_NOTE,
+          date: today(), place: c.city, signatures: signature(v),
         }, `Обосновка чл. 72 ЗОП - ${t.tenderName}`);
       },
     });
@@ -358,7 +361,7 @@ const ZOP_BUILDERS = {
   async guarantee(t, env, z) {
     const c = z.company;
     const accounts = c.bankAccounts || [];
-    return formDialog({
+    return zopDialog({
       title: 'Искане за освобождаване на гаранция',
       wide: true,
       fields: [grid(
@@ -386,7 +389,7 @@ const ZOP_BUILDERS = {
               ? { p: `Моля сумата да бъде преведена по банкова сметка: IBAN ${account?.iban || '……………………'}${account?.bic ? `, BIC ${account.bic}` : ''}${account?.bank ? `, ${account.bank}` : ''}, титуляр ${c.name}.` }
               : { p: `Моля оригиналът на ${v.form === 'Банкова гаранция' ? 'банковата гаранция' : 'застрахователната полица'} да бъде върнат на ${c.name} или банката/застрахователя да бъде уведомен(а) за освобождаването.` },
           ],
-          date: today(), place: c.city, signatures: signature(v), note: ZOP_NOTE,
+          date: today(), place: c.city, signatures: signature(v),
         }, `Искане за гаранция - ${t.tenderName}`);
       },
     });
@@ -394,7 +397,7 @@ const ZOP_BUILDERS = {
 
   async poa(t, env, z) {
     const c = z.company;
-    return formDialog({
+    return zopDialog({
       title: 'Пълномощно',
       wide: true,
       fields: [grid(
@@ -416,7 +419,7 @@ const ZOP_BUILDERS = {
             { p: v.scope },
             { p: 'Пълномощното е валидно до приключване на процедурата за възлагане на обществената поръчка. Упълномощеното лице няма право да преупълномощава трети лица.' },
           ],
-          date: today(), place: c.city, signatures: [{ label: 'Упълномощител', name: v.signer, role: v.role }, { label: 'Приел пълномощието', name: v.agent }], note: ZOP_NOTE,
+          date: today(), place: c.city, signatures: [{ label: 'Упълномощител', name: v.signer, role: v.role }, { label: 'Приел пълномощието', name: v.agent }],
         }, `Пълномощно - ${t.tenderName}`);
       },
     });
@@ -424,7 +427,7 @@ const ZOP_BUILDERS = {
 
   async consortium(t, env, z) {
     const c = z.company;
-    return formDialog({
+    return zopDialog({
       title: 'Споразумение за създаване на обединение',
       wide: true,
       fields: [grid(
@@ -456,7 +459,7 @@ const ZOP_BUILDERS = {
             { h: '5. Срок и промени' },
             { p: 'Споразумението влиза в сила от подписването му и е със срок до пълното изпълнение на договора, включително гаранционните срокове. Не се допуска промяна в състава на обединението след подаването на офертата.' },
           ],
-          date: today(), place: c.city, signatures: partners.slice(0, 6).map((p, i) => ({ label: `За участник ${i + 1}`, name: p.split(',')[0] })), note: ZOP_NOTE,
+          date: today(), place: c.city, signatures: partners.slice(0, 6).map((p, i) => ({ label: `За участник ${i + 1}`, name: p.split(',')[0] })),
         }, `Споразумение за обединение - ${t.tenderName}`);
       },
     });
@@ -465,7 +468,7 @@ const ZOP_BUILDERS = {
   async subcontractor(t, env, z) {
     const c = z.company;
     const companies = [...env.companies].sort((a, b) => a.name.localeCompare(b.name, 'bg'));
-    return formDialog({
+    return zopDialog({
       title: 'Декларация за съгласие на подизпълнител',
       wide: true,
       fields: [grid(
@@ -491,7 +494,7 @@ const ZOP_BUILDERS = {
             ] },
             { p: 'Известна ми е отговорността по чл. 313 от Наказателния кодекс за посочване на неверни данни.', muted: true },
           ],
-          date: today(), place: sub.city, signatures: [{ label: 'Декларатор', name: v.subSigner, role: v.subRole }], note: ZOP_NOTE,
+          date: today(), place: sub.city, signatures: [{ label: 'Декларатор', name: v.subSigner, role: v.subRole }],
         }, `Съгласие на подизпълнител - ${sub.name} - ${t.tenderName}`);
       },
     });

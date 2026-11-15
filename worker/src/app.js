@@ -2,7 +2,7 @@ import {
   b64url, hashPassword, randomCode, randomToken, safeEqual, sha256, signToken, verifyPassword, verifyToken,
 } from './crypto.js';
 import {
-  addDays, computeTotals, CURRENCIES, DEFAULT_COMPANY, DOC_TYPES, nextNumber, parseJson, paymentStatusOf, TAX_DOCS, validateBankAccounts,
+  addDays, computeTotals, CURRENCIES, DEFAULT_COMPANY, DOC_TYPES, nextCashOrder, nextNumber, NOTE_TYPES, parseJson, PAYABLE_TYPES, paymentStatusOf, REFUND_TYPES, TAX_DOCS, validateBankAccounts,
   validateLines,
 } from './documents.js';
 import { renderEmail } from './email.js';
@@ -897,6 +897,27 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (values.paymentMethod && !methods.includes(values.paymentMethod)) errors.paymentMethod = 'Изберете от списъка.';
     values.vatExemptReason = clean(body.vatExemptReason, MAX_TEXT);
     values.notes = clean(body.notes, MAX_MULTILINE, { multiline: true });
+    values.advance = docType === 'Фактура' && body.advance === 'Да' ? 'Да' : 'Не';
+    if (docType === 'Протокол по чл. 117') {
+      values.sourceDocNumber = clean(body.sourceDocNumber, 60);
+      values.sourceDocDate = clean(body.sourceDocDate, 10);
+      if (!values.sourceDocNumber) errors.sourceDocNumber = 'Въведете номера на фактурата на доставчика.';
+      if (!values.sourceDocDate || !isValidDay(values.sourceDocDate)) errors.sourceDocDate = 'Въведете датата на фактурата на доставчика.';
+      if (lines?.some((l) => !(l.vatRate > 0))) errors.lines = 'В протокола ДДС се начислява: ставката е 20 или 9%.';
+    }
+    // Приспадане на аванс: само в обикновена фактура, към издадена авансова фактура на същия контрагент.
+    const deductions = (lines || []).filter((l) => l.advanceOf);
+    if (deductions.length) {
+      if (docType !== 'Фактура' || values.advance === 'Да') errors.lines = 'Аванс се приспада само в окончателна фактура.';
+      for (const line of deductions) {
+        const [advance] = await ctx.db.find('documents', 'id', line.advanceOf);
+        if (!advance || advance.orgId !== ctx.org.id || advance.docType !== 'Фактура' || advance.advance !== 'Да' || advance.docStatus !== 'Издаден' || advance.companyId !== values.companyId) {
+          errors.lines = 'Приспаданият аванс трябва да е по издадена авансова фактура към същия контрагент.';
+        } else if (round2(-line.qty * line.price) > round2(Number(advance.subtotal) || 0) + 0.004) {
+          errors.lines = `Приспадането е по-голямо от аванса по фактура № ${advance.number}.`;
+        }
+      }
+    }
 
     // Валута: евро винаги; друга валута само при план с тази възможност и с курс към еврото.
     values.currency = clean(body.currency, 3).toUpperCase() || 'EUR';
@@ -922,6 +943,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
 
     if (lines) {
       const totals = computeTotals(lines, docType);
+      if (totals.total < 0 && !errors.lines) errors.lines = 'Сумата на документа не може да е отрицателна.';
       Object.assign(values, { lines: JSON.stringify(lines), subtotal: totals.subtotal, vatAmount: totals.vatAmount, total: totals.total });
     }
     return { values, errors };
@@ -934,11 +956,11 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (!DOC_TYPES.includes(docType)) throw new HttpError(422, 'Невалиден вид документ.');
     const { values, errors } = await documentInput(ctx, body, docType);
     let relatedId = '';
-    if (docType === 'Кредитно известие') {
+    if (NOTE_TYPES.includes(docType)) {
       relatedId = clean(body.relatedId, 40);
       const [invoice] = relatedId ? await ctx.db.find('documents', 'id', relatedId) : [];
       if (!invoice || invoice.orgId !== ctx.org.id || invoice.docType !== 'Фактура' || invoice.docStatus !== 'Издаден') {
-        errors.relatedId = 'Кредитното известие трябва да е към издадена фактура.';
+        errors.relatedId = `${docType} трябва да е към издадена фактура.`;
       }
     }
     failIfErrors(errors);
@@ -952,7 +974,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       docStatus: 'Чернова',
       ...values,
       issueDate: values.issueDate || today(),
-      dueDate: values.dueDate || addDays(values.issueDate || today(), docType === 'Оферта' ? 30 : Number(company.dueDays) || 7),
+      // Протоколът по чл. 117 не се плаща: няма падеж.
+      dueDate: docType === 'Протокол по чл. 117' ? '' : values.dueDate || addDays(values.issueDate || today(), docType === 'Оферта' ? 30 : Number(company.dueDays) || 7),
       relatedId,
       paidAmount: 0,
       paymentStatus: 'Неплатен',
@@ -995,7 +1018,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
 
   // Наличностите се движат при издаване на фактура (намаляват) и кредитно известие (връщат се).
   async function moveStock(ctx, doc, direction) {
-    if (!TAX_DOCS.includes(doc.docType)) return;
+    if (!['Фактура', 'Кредитно известие'].includes(doc.docType) || doc.advance === 'Да') return;
     const sign = (doc.docType === 'Фактура' ? -1 : 1) * direction;
     for (const line of parseJson(doc.lines, [])) {
       if (!line.productId) continue;
@@ -1033,10 +1056,13 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (!buyer || buyer.orgId !== ctx.org.id) throw new HttpError(422, 'Контрагентът вече не съществува.');
     if (TAX_DOCS.includes(doc.docType)) {
       if (!buyer.address && !buyer.city) throw new HttpError(422, 'Попълнете адреса на контрагента, преди да издадете фактура.');
-      if (company.vatRegistered === 'Не' && lines.some((l) => l.vatRate > 0)) {
+      if (doc.docType !== 'Протокол по чл. 117' && company.vatRegistered === 'Не' && lines.some((l) => l.vatRate > 0)) {
         throw new HttpError(422, 'Фирмата не е регистрирана по ДДС: всички редове трябва да са с 0% ДДС.');
       }
-      if (lines.some((l) => l.vatRate === 0) && !doc.vatExemptReason) {
+      if (doc.docType === 'Протокол по чл. 117') {
+        if (company.vatRegistered !== 'Да') throw new HttpError(422, 'Протокол по чл. 117 ЗДДС издава само фирма, регистрирана по ДДС.');
+        if (!doc.vatExemptReason) throw new HttpError(422, 'Посочете основанието за начисляване на ДДС, например „чл. 82, ал. 2 от ЗДДС“.');
+      } else if (lines.some((l) => l.vatRate === 0) && !doc.vatExemptReason) {
         throw new HttpError(422, company.vatRegistered === 'Не'
           ? 'Посочете основание за неначисляване на ДДС, например „чл. 113, ал. 9 от ЗДДС“.'
           : 'При ставка 0% посочете основание за неначисляване на ДДС.');
@@ -1101,7 +1127,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const allowed = {
       'Оферта': ['Проформа фактура', 'Фактура'],
       'Проформа фактура': ['Фактура'],
-      'Фактура': ['Кредитно известие'],
+      'Фактура': ['Кредитно известие', 'Дебитно известие'],
     }[source.docType] || [];
     if (!allowed.includes(docType) || ['Чернова', 'Анулиран'].includes(source.docStatus)) {
       throw new HttpError(409, 'От този документ не може да се създаде такъв.');
@@ -1133,7 +1159,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       paymentStatus: 'Неплатен',
       paymentMethod: source.paymentMethod,
       vatExemptReason: source.vatExemptReason,
-      notes: docType === 'Кредитно известие' ? `Към фактура № ${source.number} от ${source.issueDate}` : '',
+      notes: NOTE_TYPES.includes(docType) ? `Към фактура № ${source.number} от ${source.issueDate}` : '',
       createdBy: ctx.user.id,
       createdAt: stamp,
       updatedAt: stamp,
@@ -1330,8 +1356,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const errors = {};
     const documentId = clean(body.documentId, 40);
     const [doc] = documentId ? await ctx.db.find('documents', 'id', documentId) : [];
-    if (!doc || doc.orgId !== ctx.org.id || doc.docStatus !== 'Издаден' || !['Фактура', 'Проформа фактура'].includes(doc.docType)) {
-      errors.documentId = 'Плащане се отбелязва по издадена фактура или проформа.';
+    if (!doc || doc.orgId !== ctx.org.id || doc.docStatus !== 'Издаден' || ![...PAYABLE_TYPES, ...REFUND_TYPES].includes(doc.docType)) {
+      errors.documentId = 'Плащане се отбелязва по издадена фактура, проформа или известие.';
     }
     const amount = round2(parseNumber(body.amount));
     if (!(amount > 0)) errors.amount = 'Въведете положителна сума.';
@@ -1339,9 +1365,9 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (!isValidDay(paidAt)) errors.paidAt = 'Невалидна дата.';
     const method = clean(body.method, 40) || 'Банков превод';
     if (!schema.payments.columns.find((c) => c.name === 'method').choices.includes(method)) errors.method = 'Изберете от списъка.';
-    if (!errors.documentId && amount > 0 && amount > round2(Number(doc.total) - Number(doc.paidAmount || 0)) + 0.004) {
-      errors.amount = `Сумата е по-голяма от остатъка (${round2(Number(doc.total) - Number(doc.paidAmount || 0)).toFixed(2)}).`;
-    }
+    // По кредитно известие сумата е с минус: остатъкът за връщане е по абсолютна стойност.
+    const left = errors.documentId ? 0 : round2(Math.abs(Number(doc.total)) - Number(doc.paidAmount || 0));
+    if (!errors.documentId && amount > 0 && amount > left + 0.004) errors.amount = `Сумата е по-голяма от остатъка (${left.toFixed(2)}).`;
     failIfErrors(errors);
     const payment = {
       id: newId('payments'),
@@ -1352,9 +1378,14 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       amount,
       method,
       reference: clean(body.reference, MAX_TEXT),
+      cashOrder: '',
       createdBy: ctx.user.id,
       createdAt: nowIso(),
     };
+    // Плащането в брой се документира с касов ордер (чл. 6 ЗСч): приходен при постъпление, разходен при връщане.
+    if (method === 'В брой') {
+      payment.cashOrder = nextCashOrder(await ctx.db.find('payments', 'orgId', ctx.org.id), REFUND_TYPES.includes(doc.docType) ? 'РКО' : 'ПКО', paidAt.slice(0, 4));
+    }
     await ctx.db.create('payments', payment);
     const updated = await recalcPaid(ctx, documentId);
     await audit(ctx, 'documents', documentId, 'Плащане', `${money(amount, doc.currency || 'EUR')}, ${method}`);

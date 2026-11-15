@@ -276,7 +276,10 @@
     "display": "number",
     "columns": [
       { "name": "orgId", "label": "Организация", "kind": "text", "indexed": true, "system": true, "hidden": true },
-      { "name": "docType", "label": "Вид", "kind": "choice", "choices": ["Оферта", "Проформа фактура", "Фактура", "Кредитно известие"], "indexed": true },
+      { "name": "docType", "label": "Вид", "kind": "choice", "choices": ["Оферта", "Проформа фактура", "Фактура", "Кредитно известие", "Дебитно известие", "Протокол по чл. 117"], "indexed": true },
+      { "name": "advance", "label": "Авансово плащане", "kind": "choice", "choices": ["Не", "Да"], "default": "Не" },
+      { "name": "sourceDocNumber", "label": "№ на фактурата на доставчика", "kind": "text" },
+      { "name": "sourceDocDate", "label": "Дата на фактурата на доставчика", "kind": "day" },
       { "name": "number", "label": "Номер", "kind": "text", "indexed": true },
       { "name": "docStatus", "label": "Статус", "kind": "choice", "choices": ["Чернова", "Издаден", "Приета", "Отказана", "Анулиран"], "indexed": true },
       { "name": "issueDate", "label": "Дата на издаване", "kind": "day" },
@@ -328,6 +331,7 @@
       { "name": "amount", "label": "Сума", "kind": "number" },
       { "name": "method", "label": "Начин", "kind": "choice", "choices": ["Банков превод", "В брой", "С карта", "Наложен платеж"] },
       { "name": "reference", "label": "Основание / референция", "kind": "text" },
+      { "name": "cashOrder", "label": "Касов ордер №", "kind": "text" },
       { "name": "createdBy", "label": "Въвел", "kind": "text" },
       { "name": "createdAt", "label": "Въведено на", "kind": "date" }
     ]

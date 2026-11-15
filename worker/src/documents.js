@@ -1,11 +1,16 @@
-// Оферти, проформи, фактури и кредитни известия: редове, суми, ДДС и номерация.
+// Оферти, проформи, фактури, кредитни и дебитни известия, протоколи по чл. 117 ЗДДС: редове, суми, ДДС и номерация.
 import { clean, MAX_TEXT, parseNumber, round2 } from './validate.js';
 
-export const DOC_TYPES = ['Оферта', 'Проформа фактура', 'Фактура', 'Кредитно известие'];
+export const DOC_TYPES = ['Оферта', 'Проформа фактура', 'Фактура', 'Кредитно известие', 'Дебитно известие', 'Протокол по чл. 117'];
 export const VAT_RATES = [20, 9, 0];
 export const MAX_LINES = 100;
-// Фактурите и известията към тях са с обща поредица от 10 цифри (чл. 78 ППЗДДС).
-export const TAX_DOCS = ['Фактура', 'Кредитно известие'];
+// Фактурите, известията към тях (чл. 115 ЗДДС) и протоколите по чл. 117 ЗДДС са с обща поредица от 10 цифри.
+export const TAX_DOCS = ['Фактура', 'Кредитно известие', 'Дебитно известие', 'Протокол по чл. 117'];
+// Известията са винаги към издадена фактура.
+export const NOTE_TYPES = ['Кредитно известие', 'Дебитно известие'];
+// По тези документи клиентът плаща; по кредитно известие фирмата връща сума (разходен касов ордер при плащане в брой).
+export const PAYABLE_TYPES = ['Фактура', 'Проформа фактура', 'Дебитно известие'];
+export const REFUND_TYPES = ['Кредитно известие'];
 const PREFIX = { 'Оферта': 'OF', 'Проформа фактура': 'PF' };
 
 // Валутите за документи. EUR е националната валута; при друга валута документът носи курс на ЕЦБ
@@ -56,6 +61,8 @@ export function validateLines(raw, productsById) {
     const n = i + 1;
     if (!row || typeof row !== 'object') return { error: `Ред ${n} е невалиден.` };
     const productId = clean(row.productId, 40);
+    // Ред „Приспадане на аванс“ във фактура: отрицателна цена, сочи авансовата фактура.
+    const advanceOf = clean(row.advanceOf, 40);
     if (productId && !productsById.has(productId)) return { error: `Ред ${n}: артикулът не съществува.` };
     const name = clean(row.name, MAX_TEXT);
     if (!name) return { error: `Ред ${n}: въведете наименование.` };
@@ -64,7 +71,7 @@ export function validateLines(raw, productsById) {
     const discount = row.discount === '' || row.discount === undefined ? 0 : parseNumber(row.discount);
     const vatRate = parseNumber(row.vatRate);
     if (!(qty > 0) || qty > 1e7) return { error: `Ред ${n}: количеството трябва да е положително число.` };
-    if (!(price >= 0) || price > 1e10) return { error: `Ред ${n}: невалидна цена.` };
+    if (advanceOf ? !(price < 0 && price > -1e10) : !(price >= 0) || price > 1e10) return { error: `Ред ${n}: невалидна цена.` };
     if (!(discount >= 0 && discount <= 100)) return { error: `Ред ${n}: отстъпката е между 0 и 100%.` };
     if (!VAT_RATES.includes(vatRate)) return { error: `Ред ${n}: ДДС ставката е 20, 9 или 0%.` };
     lines.push({
@@ -75,6 +82,7 @@ export function validateLines(raw, productsById) {
       price: Math.round(price * 10000) / 10000,
       discount: round2(discount),
       vatRate,
+      ...(advanceOf ? { advanceOf } : {}),
     });
   }
   return { lines };
@@ -118,6 +126,13 @@ export function nextNumber(documents, docType, { year, invoiceStart = 1 }) {
   const used = documents
     .filter((d) => d.docType === docType && d.number.startsWith(prefix))
     .map((d) => Number(d.number.slice(prefix.length)) || 0);
+  return `${prefix}${String((used.length ? Math.max(...used) : 0) + 1).padStart(4, '0')}`;
+}
+
+// Пореден номер на касов ордер за годината: ПКО-2026-0001 / РКО-2026-0001.
+export function nextCashOrder(payments, kind, year) {
+  const prefix = `${kind}-${year}-`;
+  const used = payments.filter((p) => String(p.cashOrder || '').startsWith(prefix)).map((p) => Number(p.cashOrder.slice(prefix.length)) || 0);
   return `${prefix}${String((used.length ? Math.max(...used) : 0) + 1).padStart(4, '0')}`;
 }
 

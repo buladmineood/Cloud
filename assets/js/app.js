@@ -1,9 +1,10 @@
 import {
   addressLine, api, confirmDialog, downloadCsv, emptyState, fatal, field, formatDate, formatTime, formDialog, formValues, h, icon, linkBox,
   money, mountShell, norm, num, pageHead, parseNum, pill, round2, selectField, setOrg, showError, showFieldErrors, timeAgo, toast, today,
-} from './core.js?v=c0e092ac04';
-import { buildPdf, saveFile } from './pdf.js?v=c0e092ac04';
-import { DEFAULT_COUNTRY, placeAutocomplete } from './places.js?v=c0e092ac04';
+} from './core.js?v=acbd99f011';
+import { buildPdf, saveFile } from './pdf.js?v=acbd99f011';
+import { balanceConfirmation, cashOrder, handoverProtocol, paymentReminder, ZOP_DOCS, zopDocument } from './letters.js?v=acbd99f011';
+import { DEFAULT_COUNTRY, placeAutocomplete } from './places.js?v=acbd99f011';
 
 let shell;
 let main;
@@ -225,7 +226,12 @@ function taskRow(a) {
 }
 
 const unpaid = () => data.documents.filter((d) => d.docType === 'Фактура' && d.docStatus === 'Издаден' && d.paymentStatus !== 'Платен');
-const outstanding = (d) => round2(d.total - d.paidAmount);
+// По кредитно известие сумата е с минус: остатъкът (за връщане) е по абсолютна стойност.
+const outstanding = (d) => round2(Math.abs(d.total) - d.paidAmount);
+// Данни за документите, които се създават само като PDF (letters.js).
+const letterEnv = () => ({ company: data.company, companies: data.companies, documents: data.documents, payments: data.payments, find, logo: logoBytes });
+const PROTOCOL = 'Протокол по чл. 117';
+const PAYABLE = ['Фактура', 'Проформа фактура', 'Дебитно известие'];
 // Равностойност в евро: сумите в документи в чужда валута се превръщат по курса на документа.
 const outstandingEur = (d) => round2((d.totalEur ?? d.total) - (d.paidAmountEur ?? d.paidAmount));
 
@@ -488,7 +494,11 @@ async function viewRecord(entity, id) {
     const turnover = docs.filter((d) => TAX.includes(d.docType)).reduce((s, d) => s + (d.subtotalEur ?? d.subtotal), 0);
     side.push(h('section', { class: 'card' }, h('dl', { class: 'details details--stacked' },
       h('dt', {}, 'Оборот без ДДС'), h('dd', { class: 'big-num' }, money(turnover)),
-      h('dt', {}, 'Дължимо'), h('dd', { class: `big-num ${due > 0 ? 'text-error' : ''}` }, money(due)))));
+      h('dt', {}, 'Дължимо'), h('dd', { class: `big-num ${due > 0 ? 'text-error' : ''}` }, money(due)))),
+    h('section', { class: 'card stack-tight' },
+      h('h2', { class: 'card__title' }, 'Писма (PDF)'),
+      h('button', { class: 'btn btn--ghost btn--wide', type: 'button', onclick: () => balanceConfirmation(record, letterEnv()) }, icon('download', 18), 'Потвърждение на салдо'),
+      h('button', { class: 'btn btn--ghost btn--wide', type: 'button', onclick: () => paymentReminder(record, letterEnv()) }, icon('download', 18), 'Покана за плащане')));
   }
 
   if (entity === 'deals') {
@@ -627,6 +637,12 @@ function tenderSections(record, content, side) {
       render();
     }
   };
+  side.unshift(h('section', { class: 'card stack-tight' },
+    h('h2', { class: 'card__title' }, 'Документи по ЗОП (PDF)'),
+    h('p', { class: 'small muted' }, 'Проекти с данните на фирмата и поръчката. Ако възложителят има образец, ползвайте него. Подписват се с КЕП и се подават в ЦАИС ЕОП.'),
+    h('div', { class: 'zop-docs' }, ZOP_DOCS.map((d) => h('button', {
+      class: 'zop-doc', type: 'button', onclick: () => zopDocument(d.key, record, letterEnv()).catch(() => {}),
+    }, h('span', { class: 'zop-doc__title' }, d.title), h('span', { class: 'zop-doc__hint' }, d.hint))))));
   content.push(h('section', { class: 'card stack' },
     h('div', { class: 'row row--between' }, h('h2', {}, 'Документи за участие'), progress),
     h('p', { class: 'small muted' }, 'Типичните документи по ЗОП. Конкретните изисквания са в документацията на поръчката — отбележете ненужните като „Неприложим“ и добавете липсващите.'),
@@ -727,7 +743,7 @@ function viewActivities() {
 
 // --- Търговски документи ---
 
-const TAX = ['Фактура', 'Кредитно известие'];
+const TAX = ['Фактура', 'Кредитно известие', 'Дебитно известие', PROTOCOL];
 const docState = { type: '', status: '', pay: '', q: '', page: 1, sort: 'issueDate', dir: -1 };
 
 function viewDocuments(query) {
@@ -737,7 +753,7 @@ function viewDocuments(query) {
   const filtered = () => data.documents.filter((d) => {
     if (docState.type && d.docType !== docState.type) return false;
     if (docState.status && d.docStatus !== docState.status) return false;
-    if (docState.pay === 'unpaid' && !(d.docStatus === 'Издаден' && ['Фактура', 'Проформа фактура'].includes(d.docType) && d.paymentStatus !== 'Платен')) return false;
+    if (docState.pay === 'unpaid' && !(d.docStatus === 'Издаден' && PAYABLE.includes(d.docType) && d.paymentStatus !== 'Платен')) return false;
     if (docState.q && !norm(`${d.number} ${d.companyName} ${titleOf('companies', find('companies', d.companyId))} ${d.lines.map((l) => l.name).join(' ')}`).includes(norm(docState.q))) return false;
     return true;
   });
@@ -768,6 +784,7 @@ function viewDocuments(query) {
             d.buyer?.eik || '', d.buyer?.vatNumber || '', d.currency, String(d.exchangeRate).replace('.', ','),
             ...[d.subtotal, d.vatAmount, d.total, d.paidAmount, d.subtotalEur, d.vatAmountEur, d.totalEur].map((n) => String(n ?? '').replace('.', ',')), d.docStatus, d.paymentStatus])),
       }, icon('download', 18), 'CSV'),
+      canEdit() && data.company.vatRegistered === 'Да' && h('a', { class: 'btn btn--ghost', href: `#/documents/new?type=${encodeURIComponent(PROTOCOL)}`, title: 'Самоначисляване на ДДС при покупка от чуждестранен доставчик' }, icon('plus', 18), 'Протокол чл. 117'),
       canEdit() && h('a', { class: 'btn btn--ghost', href: '#/documents/new?type=Оферта' }, icon('plus', 18), 'Оферта'),
       canEdit() && h('a', { class: 'btn', href: '#/documents/new?type=Фактура' }, icon('plus', 18), 'Фактура')),
     h('div', { class: 'toolbar' }, search.el,
@@ -833,6 +850,7 @@ function linesEditor(initial, onChange, currency = () => 'EUR') {
       add),
     get: () => lines.map((l) => ({ ...l, qty: parseNum(l.qty), price: parseNum(l.price), discount: parseNum(l.discount), vatRate: Number(l.vatRate) })),
     refresh: render,
+    add: (line) => { lines.push(line); render(); onChange(lines); },
   };
 }
 
@@ -862,12 +880,32 @@ function totalsBlock(t, currency = 'EUR', rate = 1, rateDate = '') {
       h('dt', {}, 'Общо в EUR'), h('dd', {}, money(eur(t.total)))]);
 }
 
+// Окончателна фактура: ред с минус за аванса по издадена авансова фактура към същия контрагент.
+async function deductAdvance(form, editor) {
+  const companyId = form.elements.companyId.value;
+  const used = (id) => data.documents.filter((d) => d.docStatus !== 'Анулиран' && d.lines.some((l) => l.advanceOf === id)).reduce((s, d) => s + d.lines.filter((l) => l.advanceOf === id).reduce((x, l) => x - l.qty * l.price, 0), 0);
+  const advances = data.documents.filter((d) => d.docType === 'Фактура' && d.advance === 'Да' && d.docStatus === 'Издаден' && d.companyId === companyId)
+    .map((d) => ({ d, left: round2(d.subtotal - used(d.id)) })).filter((x) => x.left > 0.004);
+  if (!companyId) { toast('Първо изберете контрагент.', 'error'); return; }
+  if (!advances.length) { toast('Няма издадени авансови фактури към този контрагент с неприспаднат остатък.', 'error'); return; }
+  const result = await formDialog({
+    title: 'Приспадане на аванс',
+    fields: [selectField({ name: 'id', label: 'Авансова фактура', options: advances.map(({ d, left }) => [d.id, `№ ${d.number} от ${formatDate(d.issueDate)} · остатък ${money(left, d.currency)} без ДДС`]) })],
+    submitLabel: 'Добавете ред',
+  });
+  if (!result) return;
+  const { d, left } = advances.find((x) => x.d.id === result.id);
+  const rate = d.lines[0]?.vatRate ?? 20;
+  editor.add({ productId: '', name: `Приспадане на аванс по фактура № ${d.number} от ${formatDate(d.issueDate)}`, qty: 1, unit: 'бр.', price: -left, discount: '', vatRate: rate, advanceOf: d.id });
+}
+
 function documentEditor(doc, query) {
   const docType = doc?.docType || query.get('type') || 'Фактура';
   const values = doc || {
     companyId: query.get('company') || '', dealId: query.get('deal') || '', issueDate: today(), dueDate: '', paymentMethod: 'Банков превод',
-    vatExemptReason: data.company.vatRegistered === 'Не' ? 'чл. 113, ал. 9 от ЗДДС' : '', notes: '', lines: [],
+    vatExemptReason: docType === PROTOCOL ? 'чл. 82, ал. 2 от ЗДДС' : data.company.vatRegistered === 'Не' ? 'чл. 113, ал. 9 от ЗДДС' : '', notes: '', lines: [],
   };
+  const protocol = docType === PROTOCOL;
   if (!doc && values.dealId && !values.lines.length) {
     const deal = find('deals', values.dealId);
     // Документ към сделка е винаги към нейния контрагент.
@@ -932,20 +970,25 @@ function documentEditor(doc, query) {
   const form = h('form', { class: 'form', novalidate: true },
     h('section', { class: 'card stack' },
       h('div', { class: 'form__grid' },
-        h('div', { class: 'field' }, h('label', { for: 'f-companyId' }, 'Контрагент'), companySelect),
+        h('div', { class: 'field' }, h('label', { for: 'f-companyId' }, protocol ? 'Доставчик (издал фактурата)' : 'Контрагент'), companySelect),
         h('div', { class: 'field' }, h('label', { for: 'f-dealId' }, 'Сделка', h('span', { class: 'field__hint' }, ' (по желание)')), dealSelect),
+        protocol && field({ name: 'sourceDocNumber', label: '№ на фактурата на доставчика', value: values.sourceDocNumber, maxlength: 60 }),
+        protocol && field({ name: 'sourceDocDate', label: 'Дата на фактурата на доставчика', type: 'date', value: values.sourceDocDate }),
         field({ name: 'issueDate', label: 'Дата на издаване', type: 'date', value: values.issueDate }),
-        field({ name: 'dueDate', label: docType === 'Оферта' ? 'Валидна до' : 'Падеж', type: 'date', value: values.dueDate, hint: 'празно = по подразбиране' }),
+        !protocol && field({ name: 'dueDate', label: docType === 'Оферта' ? 'Валидна до' : 'Падеж', type: 'date', value: values.dueDate, hint: 'празно = по подразбиране' }),
         TAX.includes(docType) && field({ name: 'taxEventDate', label: 'Дата на данъчно събитие', type: 'date', value: values.taxEventDate, hint: 'ако е различна' }),
-        selectField({ name: 'paymentMethod', label: 'Начин на плащане', options: PAYMENT_METHODS, value: values.paymentMethod }),
-        h('div', { class: 'field' }, h('label', { for: 'f-bankAccount' }, 'Банкова сметка'), accountSelect),
+        docType === 'Фактура' && selectField({ name: 'advance', label: 'Авансово плащане', options: [['Не', 'Не — обикновена фактура'], ['Да', 'Да — фактура за аванс']], value: values.advance || 'Не' }),
+        !protocol && selectField({ name: 'paymentMethod', label: 'Начин на плащане', options: PAYMENT_METHODS, value: values.paymentMethod }),
+        !protocol && h('div', { class: 'field' }, h('label', { for: 'f-bankAccount' }, 'Банкова сметка'), accountSelect),
         h('div', { class: 'field' }, h('label', { for: 'f-currency' }, 'Валута',
           !canForeign && h('span', { class: 'field__hint' }, ' (други валути — с платен план)')), currencySelect),
         rateField,
-        field({ name: 'vatExemptReason', label: 'Основание за 0% ДДС', value: values.vatExemptReason, hint: 'при нулева ставка', wrapClass: 'full', maxlength: 255 }),
+        field({ name: 'vatExemptReason', label: protocol ? 'Основание за начисляване на ДДС' : 'Основание за 0% ДДС', value: values.vatExemptReason, hint: protocol ? 'напр. чл. 82, ал. 2 или чл. 84 от ЗДДС' : 'при нулева ставка', wrapClass: 'full', maxlength: 255 }),
         h('div', { class: 'field full' }, h('label', { for: 'f-notes' }, 'Забележки', h('span', { class: 'field__hint' }, ' (по желание)')),
           h('textarea', { id: 'f-notes', name: 'notes', rows: 3, maxlength: 8000 }, values.notes || '')))),
-    h('section', { class: 'card stack' }, h('h2', { class: 'card__title' }, 'Редове'), h('div', { 'data-field': 'lines' }, editor.el), totalsBox),
+    h('section', { class: 'card stack' }, h('h2', { class: 'card__title' }, 'Редове'), h('div', { 'data-field': 'lines' }, editor.el),
+      docType === 'Фактура' && h('div', { class: 'row-tight' }, h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: () => deductAdvance(form, editor) }, icon('wallet', 16), 'Приспаднете аванс')),
+      totalsBox),
     alert);
   // Полето „lines“ няма input: грешката му се показва под таблицата.
   const linesError = (message) => {
@@ -1012,7 +1055,7 @@ const partyLines = (p) => [
 function buyerOf(doc) {
   if (doc.buyer) return doc.buyer;
   const c = find('companies', doc.companyId) || {};
-  return { name: c.name, eik: c.eik, vatNumber: c.vatNumber, mol: c.mol, city: c.city, address: c.address };
+  return { name: c.name, eik: c.eik, vatNumber: c.vatNumber, mol: c.mol, country: c.country, city: c.city, postcode: c.postcode, region: c.region, address: c.address };
 }
 
 // Доставчикът: при издаден документ — както е записан при издаването; при чернова — фирмата с избраната сметка.
@@ -1061,14 +1104,16 @@ function documentPrint(doc) {
         h('h2', { class: 'doc-print__type' }, doc.docType.toUpperCase()),
         h('p', { class: 'doc-print__number' }, doc.number ? `№ ${doc.number}` : 'ЧЕРНОВА'),
         TAX.includes(doc.docType) && doc.number && h('p', { class: 'small' }, 'ОРИГИНАЛ'),
-        related && h('p', { class: 'small' }, `Към ${related.docType.toLowerCase()} № ${related.number} от ${formatDate(related.issueDate)}`)),
+        related && h('p', { class: 'small' }, `Към ${related.docType.toLowerCase()} № ${related.number} от ${formatDate(related.issueDate)}`),
+        doc.docType === PROTOCOL && h('p', { class: 'small' }, `По фактура № ${doc.sourceDocNumber || '—'} от ${formatDate(doc.sourceDocDate)} на доставчика`),
+        doc.advance === 'Да' && h('p', { class: 'small' }, h('strong', {}, 'Фактура за авансово плащане'))),
       h('dl', { class: 'doc-print__dates' },
         h('dt', {}, 'Дата на издаване'), h('dd', {}, formatDate(doc.issueDate)),
         TAX.includes(doc.docType) && [h('dt', {}, 'Дата на данъчно събитие'), h('dd', {}, formatDate(doc.taxEventDate || doc.issueDate))],
-        doc.dueDate && [h('dt', {}, doc.docType === 'Оферта' ? 'Валидна до' : 'Падеж'), h('dd', {}, formatDate(doc.dueDate))])),
+        doc.dueDate && doc.docType !== PROTOCOL && [h('dt', {}, doc.docType === 'Оферта' ? 'Валидна до' : 'Падеж'), h('dd', {}, formatDate(doc.dueDate))])),
     h('div', { class: 'doc-print__parties' },
-      h('section', {}, h('h3', {}, 'Получател'), h('p', { class: 'doc-print__party' }, buyer.name), partyLines(buyer).map((l) => h('p', {}, l))),
-      h('section', {}, h('h3', {}, 'Доставчик'), h('p', { class: 'doc-print__party' }, seller.name), partyLines(seller).map((l) => h('p', {}, l)))),
+      h('section', {}, h('h3', {}, doc.docType === PROTOCOL ? 'Доставчик' : 'Получател'), h('p', { class: 'doc-print__party' }, buyer.name), partyLines(buyer).map((l) => h('p', {}, l))),
+      h('section', {}, h('h3', {}, doc.docType === PROTOCOL ? 'Получател (издател на протокола)' : 'Доставчик'), h('p', { class: 'doc-print__party' }, seller.name), partyLines(seller).map((l) => h('p', {}, l)))),
     h('table', { class: 'doc-print__lines' },
       h('thead', {}, h('tr', {}, ['№', 'Наименование', 'Кол.', 'Мярка', 'Ед. цена', 'Отст.', 'ДДС', 'Стойност'].map((x) => h('th', { scope: 'col' }, x)))),
       h('tbody', {}, doc.lines.map((l, i) => h('tr', {},
@@ -1077,9 +1122,11 @@ function documentPrint(doc) {
         h('td', { class: 'num' }, money(round2(l.qty * l.price * (1 - (l.discount || 0) / 100)), cur)))))),
     h('div', { class: 'doc-print__foot' },
       h('div', { class: 'doc-print__pay' },
-        h('p', {}, h('strong', {}, 'Начин на плащане: '), doc.paymentMethod || '—'),
-        doc.paymentMethod === 'Банков превод' && seller.iban && h('p', {}, `IBAN: ${seller.iban}${seller.bic ? ` · BIC: ${seller.bic}` : ''}${seller.bank ? ` · ${seller.bank}` : ''}`),
-        doc.vatExemptReason && h('p', {}, h('strong', {}, 'Основание за неначисляване на ДДС: '), doc.vatExemptReason),
+        doc.docType === PROTOCOL
+          ? h('p', {}, h('strong', {}, 'Основание за начисляване на ДДС: '), doc.vatExemptReason || '—')
+          : h('p', {}, h('strong', {}, 'Начин на плащане: '), doc.paymentMethod || '—'),
+        doc.docType !== PROTOCOL && doc.paymentMethod === 'Банков превод' && seller.iban && h('p', {}, `IBAN: ${seller.iban}${seller.bic ? ` · BIC: ${seller.bic}` : ''}${seller.bank ? ` · ${seller.bank}` : ''}`),
+        doc.docType !== PROTOCOL && doc.vatExemptReason && h('p', {}, h('strong', {}, 'Основание за неначисляване на ДДС: '), doc.vatExemptReason),
         doc.notes && h('p', { class: 'pre' }, doc.notes),
         h('p', { class: 'small' }, `Съставил: ${doc.issuedBy || userName(doc.createdBy)}`)),
       totalsBlock(t, cur, doc.exchangeRate || 1, doc.rateDate)),
@@ -1096,7 +1143,8 @@ async function viewDocument(id, query) {
   if (doc.docStatus === 'Чернова' && canEdit()) return documentEditor(doc, query);
 
   const payments = data.payments.filter((p) => p.documentId === id).sort((a, b) => a.paidAt.localeCompare(b.paidAt));
-  const payable = doc.docStatus === 'Издаден' && ['Фактура', 'Проформа фактура'].includes(doc.docType);
+  const refund = doc.docStatus === 'Издаден' && doc.docType === 'Кредитно известие';
+  const payable = doc.docStatus === 'Издаден' && (PAYABLE.includes(doc.docType) || refund);
   const derive = (docType) => h('button', {
     class: 'btn btn--ghost', type: 'button',
     onclick: async () => {
@@ -1105,10 +1153,10 @@ async function viewDocument(id, query) {
     },
   }, icon('plus', 18), docType);
   const actions = canEdit() ? [
-    payable && doc.paymentStatus !== 'Платен' && h('button', { class: 'btn', type: 'button', onclick: () => addPayment(doc) }, icon('wallet', 18), 'Плащане'),
+    payable && doc.paymentStatus !== 'Платен' && h('button', { class: 'btn', type: 'button', onclick: () => addPayment(doc) }, icon('wallet', 18), refund ? 'Върната сума' : 'Плащане'),
     doc.docType === 'Оферта' && ['Издаден', 'Приета'].includes(doc.docStatus) && [derive('Проформа фактура'), derive('Фактура')],
     doc.docType === 'Проформа фактура' && doc.docStatus === 'Издаден' && derive('Фактура'),
-    doc.docType === 'Фактура' && doc.docStatus === 'Издаден' && derive('Кредитно известие'),
+    doc.docType === 'Фактура' && doc.docStatus === 'Издаден' && [derive('Кредитно известие'), derive('Дебитно известие')],
     doc.docType === 'Оферта' && doc.docStatus === 'Издаден' && [
       h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => act(() => api(`/documents/${id}/status`, { method: 'POST', body: { status: 'Приета' } }), 'Офертата е приета.').then(route) }, 'Приета'),
       h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => act(() => api(`/documents/${id}/status`, { method: 'POST', body: { status: 'Отказана' } }), 'Офертата е отказана.').then(route) }, 'Отказана')],
@@ -1120,7 +1168,9 @@ async function viewDocument(id, query) {
       },
     }, 'Анулирайте'),
   ] : [];
-  const children = data.documents.filter((d) => d.relatedId === id);
+  const children = data.documents.filter((d) => d.relatedId === id || d.lines.some((l) => l.advanceOf === id));
+  const handover = ['Фактура', 'Проформа фактура', 'Оферта'].includes(doc.docType) && doc.advance !== 'Да' && doc.docStatus !== 'Анулиран'
+    && h('button', { class: 'btn btn--ghost', type: 'button', title: 'Приемо-предавателен протокол към документа (PDF)', onclick: () => handoverProtocol(doc, letterEnv()) }, icon('download', 18), 'Приемо-предавателен протокол');
 
   page(
     h('a', { class: 'back no-print', href: '#/documents' }, icon('back', 16), 'Оферти и фактури'),
@@ -1138,17 +1188,19 @@ async function viewDocument(id, query) {
           button.disabled = false;
         },
       }, icon('download', 18), 'Изтеглете PDF'),
-      canEdit() && ['Издаден', 'Приета', 'Отказана'].includes(doc.docStatus) && h('button', { class: 'btn', type: 'button', onclick: () => sendDialog(doc) }, icon('send', 18), 'Изпратете по имейл'))),
+      handover,
+      canEdit() && doc.docType !== PROTOCOL && ['Издаден', 'Приета', 'Отказана'].includes(doc.docStatus) && h('button', { class: 'btn', type: 'button', onclick: () => sendDialog(doc) }, icon('send', 18), 'Изпратете по имейл'))),
     h('div', { class: 'row no-print' }, pill(doc.docStatus, 'doc'), payable && pill(doc.paymentStatus, 'pay'), actions),
     h('div', { class: 'split' },
       h('div', { class: 'card doc-sheet' }, documentPrint(doc)),
       h('div', { class: 'stack no-print' },
         payable && h('section', { class: 'card stack-tight' },
-          h('h2', { class: 'card__title' }, 'Плащания'),
-          h('dl', { class: 'details' }, h('dt', {}, 'Платено'), h('dd', {}, money(doc.paidAmount, doc.currency)), h('dt', {}, 'Остатък'), h('dd', { class: outstanding(doc) > 0 ? 'text-error' : '' }, money(outstanding(doc), doc.currency))),
+          h('h2', { class: 'card__title' }, refund ? 'Върнати суми' : 'Плащания'),
+          h('dl', { class: 'details' }, h('dt', {}, refund ? 'Върнато' : 'Платено'), h('dd', {}, money(doc.paidAmount, doc.currency)), h('dt', {}, 'Остатък'), h('dd', { class: outstanding(doc) > 0 ? 'text-error' : '' }, money(outstanding(doc), doc.currency))),
           payments.length ? h('ul', { class: 'pay-list' }, payments.map((p) => h('li', {},
             h('span', {}, `${formatDate(p.paidAt)} · ${p.method}${p.reference ? ` · ${p.reference}` : ''}`),
             h('strong', {}, money(p.amount, doc.currency)),
+            p.cashOrder && h('button', { class: 'btn btn--ghost btn--small', type: 'button', title: 'Касов ордер (PDF)', onclick: () => cashOrder(p, letterEnv()).catch(() => {}) }, p.cashOrder.slice(0, 3)),
             isAdmin() && h('button', {
               class: 'icon-btn', type: 'button', 'aria-label': 'Изтрийте плащането', title: 'Изтрийте плащането',
               onclick: async () => { if (await confirmDialog({ title: 'Изтриване на плащане', text: `${money(p.amount, doc.currency)} от ${formatDate(p.paidAt)}`, confirmLabel: 'Изтрийте', danger: true })) act(() => api(`/payments/${p.id}`, { method: 'DELETE' }), 'Плащането е изтрито.').then(route); },
@@ -1211,18 +1263,19 @@ async function sendDialog(doc) {
 
 async function addPayment(doc) {
   const result = await formDialog({
-    title: `Плащане по ${doc.docType.toLowerCase()} № ${doc.number}`,
+    title: `${doc.docType === 'Кредитно известие' ? 'Върната сума по' : 'Плащане по'} ${doc.docType.toLowerCase()} № ${doc.number}`,
     fields: h('div', { class: 'form__grid' },
       field({ name: 'amount', label: `Сума (${doc.currency || 'EUR'})`, value: String(outstanding(doc)).replace('.', ','), inputmode: 'decimal', required: true }),
       field({ name: 'paidAt', label: 'Дата', type: 'date', value: today() }),
       selectField({ name: 'method', label: 'Начин', options: PAYMENT_METHODS, value: doc.paymentMethod || 'Банков превод' }),
-      field({ name: 'reference', label: 'Основание / референция', hint: 'по желание', maxlength: 255 })),
+      field({ name: 'reference', label: 'Основание / референция', hint: 'по желание', maxlength: 255 }),
+      h('p', { class: 'small muted full' }, `При плащане в брой се създава ${doc.docType === 'Кредитно известие' ? 'разходен' : 'приходен'} касов ордер с пореден номер.`)),
     submitLabel: 'Запишете',
     onSubmit: (body) => api('/payments', { method: 'POST', body: { ...body, documentId: doc.id } }),
   });
   if (result) {
     await refresh();
-    toast('Плащането е записано.');
+    toast(result.payment?.cashOrder ? `Плащането е записано: ${result.payment.cashOrder}.` : 'Плащането е записано.');
     route();
   }
 }
@@ -1238,6 +1291,7 @@ function viewPayments() {
   const columns = [
     { name: 'paidAt', label: 'Дата', kind: 'day' }, { name: 'documentId', label: 'Документ' }, { name: 'companyId', label: 'Контрагент', input: 'ref', ref: 'companies' },
     { name: 'amount', label: 'Сума', kind: 'number', input: 'money' }, { name: 'currency', label: 'Валута' }, { name: 'method', label: 'Начин' }, { name: 'reference', label: 'Основание' },
+    { name: 'cashOrder', label: 'Касов ордер' },
   ];
   const docLabel = (p) => { const d = find('documents', p.documentId); return d ? `${d.docType} № ${d.number}` : ''; };
   page(
@@ -1245,7 +1299,7 @@ function viewPayments() {
       h('button', {
         class: 'btn btn--ghost', type: 'button',
         onclick: () => downloadCsv(`payments-${today()}.csv`, columns.map((c) => c.label),
-          rows.map((p) => [formatDate(p.paidAt), docLabel(p), titleOf('companies', find('companies', p.companyId)), String(p.amount).replace('.', ','), curOf(p), p.method, p.reference])),
+          rows.map((p) => [formatDate(p.paidAt), docLabel(p), titleOf('companies', find('companies', p.companyId)), String(p.amount).replace('.', ','), curOf(p), p.method, p.reference, p.cashOrder || ''])),
       }, icon('download', 18), 'CSV')),
     rows.length ? h('div', { class: 'table-wrap' }, h('table', {},
       h('thead', {}, h('tr', {}, columns.map((c) => h('th', { scope: 'col' }, c.label)))),
@@ -1256,7 +1310,8 @@ function viewPayments() {
         h('td', { 'data-label': 'Сума', class: 'num' }, money(p.amount, curOf(p))),
         h('td', { 'data-label': 'Валута' }, curOf(p)),
         h('td', { 'data-label': 'Начин' }, p.method),
-        h('td', { 'data-label': 'Основание' }, p.reference)))))) : emptyState('wallet', 'Няма плащания', 'Плащанията се отбелязват от страницата на издадена фактура.'));
+        h('td', { 'data-label': 'Основание' }, p.reference),
+        h('td', { 'data-label': 'Касов ордер' }, p.cashOrder && h('button', { class: 'link-btn', type: 'button', title: 'Изтеглете касовия ордер (PDF)', onclick: () => cashOrder(p, letterEnv()).catch(() => {}) }, p.cashOrder))))))) : emptyState('wallet', 'Няма плащания', 'Плащанията се отбелязват от страницата на издадена фактура.'));
 }
 
 // --- Профил ---

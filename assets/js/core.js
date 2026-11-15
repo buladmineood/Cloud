@@ -436,3 +436,43 @@ export function addressLine(p) {
   const country = p.country && !/^(българия|bg|bulgaria)$/i.test(p.country.trim()) ? p.country : '';
   return [[p.postcode, p.city].filter(Boolean).join(' '), p.address, country].filter(Boolean).join(', ');
 }
+
+// Сума с думи (за касови ордери и ценови предложения): 1234,56 → „хиляда двеста тридесет и четири евро и петдесет и шест евроцента“.
+const W_ONES = { m: ['', 'един', 'два'], n: ['', 'едно', 'две'], f: ['', 'една', 'две'] };
+const W_UNITS = ['', '', '', 'три', 'четири', 'пет', 'шест', 'седем', 'осем', 'девет'];
+const W_TEENS = ['десет', 'единадесет', 'дванадесет', 'тринадесет', 'четиринадесет', 'петнадесет', 'шестнадесет', 'седемнадесет', 'осемнадесет', 'деветнадесет'];
+const W_TENS = ['', '', 'двадесет', 'тридесет', 'четиридесет', 'петдесет', 'шестдесет', 'седемдесет', 'осемдесет', 'деветдесет'];
+const W_HUNDREDS = ['', 'сто', 'двеста', 'триста', 'четиристотин', 'петстотин', 'шестстотин', 'седемстотин', 'осемстотин', 'деветстотин'];
+const wordParts = (n, gender) => {
+  const out = [];
+  if (Math.floor(n / 100)) out.push(W_HUNDREDS[Math.floor(n / 100)]);
+  const r = n % 100;
+  if (r >= 10 && r < 20) out.push(W_TEENS[r - 10]);
+  else {
+    if (Math.floor(r / 10)) out.push(W_TENS[Math.floor(r / 10)]);
+    const u = r % 10;
+    if (u) out.push(u <= 2 ? W_ONES[gender][u] : W_UNITS[u]);
+  }
+  return out;
+};
+const joinAnd = (parts) => (parts.length < 2 ? parts.join(' ') : `${parts.slice(0, -1).join(' ')} и ${parts.at(-1)}`);
+export function numberWords(value, gender = 'm') {
+  const n = Math.floor(Math.abs(Number(value) || 0));
+  if (n === 0) return 'нула';
+  const millions = Math.floor(n / 1e6);
+  const thousands = Math.floor(n / 1000) % 1000;
+  const parts = [];
+  if (millions) parts.push(millions === 1 ? 'един милион' : `${joinAnd(wordParts(millions, 'm'))} милиона`);
+  if (thousands) parts.push(thousands === 1 ? 'хиляда' : `${joinAnd(wordParts(thousands, 'f'))} хиляди`);
+  parts.push(...wordParts(n % 1000, gender));
+  // „и“ стои пред последната част, освен ако тя вече съдържа „и“ („два милиона триста и четиридесет хиляди“).
+  return parts.at(-1).includes(' и ') ? parts.join(' ') : joinAnd(parts);
+}
+export function amountWords(value, currency = 'EUR') {
+  const total = Math.round(Math.abs(Number(value) || 0) * 100);
+  const whole = Math.floor(total / 100);
+  const cents = total % 100;
+  if (currency !== 'EUR') return `${numberWords(whole)} ${currency}${cents ? ` и ${String(cents).padStart(2, '0')}/100` : ''}`;
+  const centWords = cents === 1 ? 'един евроцент' : `${numberWords(cents, 'm')} евроцента`;
+  return `${numberWords(whole, 'n')} евро${cents ? ` и ${centWords}` : ''}`;
+}

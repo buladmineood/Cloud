@@ -1,6 +1,6 @@
 // Създава PDF на оферта или фактура в браузъра с pdf-lib и шрифта Onest (кирилица).
 // Библиотеките (около 1,3 MB) се зареждат само при първото създаване на PDF.
-import { addressLine } from './core.js?v=c0e092ac04';
+import { addressLine } from './core.js?v=acbd99f011';
 
 const NAVY = [16, 41, 76];
 const GOLD = [181, 134, 42];
@@ -10,7 +10,8 @@ const TINT = [243, 239, 230];
 const A4 = [595.28, 841.89];
 const M = 40;
 const FOOTER = 'Създадено с BulAdmin Cloud · cloud.buladmin.eu';
-const TAX = ['Фактура', 'Кредитно известие'];
+const TAX = ['Фактура', 'Кредитно известие', 'Дебитно известие', 'Протокол по чл. 117'];
+const PROTOCOL = 'Протокол по чл. 117';
 
 let libsPromise;
 function loadScript(src) {
@@ -152,19 +153,22 @@ export async function buildPdf({ doc, seller, buyer, logo, related, issuedBy }) 
   const dates = [
     ['Дата на издаване', date(doc.issueDate)],
     TAX.includes(doc.docType) && ['Дата на данъчно събитие', date(doc.taxEventDate || doc.issueDate)],
-    doc.dueDate && [doc.docType === 'Оферта' ? 'Валидна до' : 'Падеж', date(doc.dueDate)],
+    doc.dueDate && doc.docType !== PROTOCOL && [doc.docType === 'Оферта' ? 'Валидна до' : 'Падеж', date(doc.dueDate)],
   ].filter(Boolean);
   dates.forEach(([label, value], i) => {
     draw(label, A4[0] - M - 90, y - i * 13, { size: 8.5, c: INK2, align: 'right' });
     draw(value, A4[0] - M, y - i * 13, { size: 9, f: fontBold, align: 'right' });
   });
-  if (related) draw(`Към ${related.docType.toLowerCase()} № ${related.number} от ${date(related.issueDate)}`, M, y, { size: 9, c: INK2 });
+  const note = related ? `Към ${related.docType.toLowerCase()} № ${related.number} от ${date(related.issueDate)}`
+    : doc.docType === PROTOCOL ? `По фактура № ${doc.sourceDocNumber || '—'} от ${date(doc.sourceDocDate)} на доставчика`
+      : doc.advance === 'Да' ? 'Фактура за авансово плащане' : '';
+  if (note) draw(note, M, y, { size: 9, c: INK2, f: doc.advance === 'Да' ? fontBold : font });
   y -= dates.length * 13 + 10;
 
   // Получател и доставчик.
   const boxW = (A4[0] - 2 * M - 14) / 2;
   const party = (title, p) => [title, p.name || '', ...partyLines(p).flatMap((l) => wrap(l, boxW - 20, 8.5))];
-  const parties = [party('ПОЛУЧАТЕЛ', buyer), party('ДОСТАВЧИК', seller)];
+  const parties = doc.docType === PROTOCOL ? [party('ДОСТАВЧИК', buyer), party('ПОЛУЧАТЕЛ (ИЗДАТЕЛ НА ПРОТОКОЛА)', seller)] : [party('ПОЛУЧАТЕЛ', buyer), party('ДОСТАВЧИК', seller)];
   const boxH = 14 + Math.max(...parties.map((p) => (p.length - 2) * 11 + 26));
   parties.forEach((lines, i) => {
     const x = M + i * (boxW + 14);
@@ -215,7 +219,13 @@ export async function buildPdf({ doc, seller, buyer, logo, related, issuedBy }) 
     ...t.byRate.flatMap((r) => [[`Данъчна основа ${r.rate}% в EUR`, money(eur(r.base))], [`ДДС ${r.rate}% в EUR`, money(eur(r.vat))]]),
     ['Общо в EUR', money(eur(t.total))],
   ];
-  const leftLines = [
+  const protocol = doc.docType === PROTOCOL;
+  const leftLines = protocol ? [
+    [`Основание за начисляване на ДДС: ${doc.vatExemptReason || '—'}`, true],
+    ['Данъкът е начислен от получателя по чл. 117 ЗДДС и се отразява в дневниците за покупки и продажби.'],
+    doc.notes && [doc.notes],
+    [`Съставил: ${issuedBy || ''}`],
+  ].filter(Boolean).flatMap(([text, strong]) => wrap(text, 270, 8.5, strong ? fontBold : font).map((line) => [line, strong])) : [
     [`Начин на плащане: ${doc.paymentMethod || '—'}`, true],
     doc.paymentMethod === 'Банков превод' && seller.iban && [`IBAN: ${seller.iban}${seller.bic ? ` · BIC: ${seller.bic}` : ''}${seller.bank ? ` · ${seller.bank}` : ''}`],
     doc.vatExemptReason && [`Основание за неначисляване на ДДС: ${doc.vatExemptReason}`],
@@ -230,7 +240,7 @@ export async function buildPdf({ doc, seller, buyer, logo, related, issuedBy }) 
   });
   const grandY = y - 10 - totalRows.length * 13 - 8;
   page.drawLine({ start: { x: A4[0] - M - 210, y: grandY + 12 }, end: { x: A4[0] - M, y: grandY + 12 }, thickness: 1.2, color: color(NAVY) });
-  draw('Сума за плащане', A4[0] - M - 110, grandY, { size: 10, f: fontBold, align: 'right' });
+  draw(protocol ? 'Общо с начисления ДДС' : 'Сума за плащане', A4[0] - M - 110, grandY, { size: 10, f: fontBold, align: 'right' });
   draw(money(t.total, cur), A4[0] - M, grandY, { size: 11, f: fontBold, align: 'right' });
   eurRows.forEach(([label, value], i) => {
     const yy = grandY - 18 - i * 12;
@@ -259,4 +269,203 @@ export function saveFile(bytes, filename) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/**
+ * Писмо, декларация, протокол или касов ордер (A4, без таблицата с ДДС на фактурите).
+ * spec: { title, subtitle, number, date, place, issuer (данни на фирмата горе вляво), logo, to: { label, lines } (адресат горе вдясно),
+ *         blocks: [{ h }, { p }, { list, numbered }, { kv: [[етикет, стойност, удебелено]] }, { table: { cols: [{ label, w, right }], rows, foot } }, { space }],
+ *         signatures: [{ label, name, role }], note (малък текст най-долу) }
+ */
+export async function buildLetter(spec) {
+  const { PDFLib, fontkit, regular, bold } = await loadLibs();
+  const { PDFDocument, rgb } = PDFLib;
+  const color = (c) => rgb(c[0] / 255, c[1] / 255, c[2] / 255);
+  const pdf = await PDFDocument.create();
+  pdf.registerFontkit(fontkit);
+  const font = await pdf.embedFont(regular, { subset: true });
+  const fontBold = await pdf.embedFont(bold, { subset: true });
+  pdf.setTitle([spec.title, spec.subtitle, spec.number && `№ ${spec.number}`].filter(Boolean).join(' '));
+  pdf.setAuthor(spec.issuer?.name || '');
+  pdf.setCreator('BulAdmin Cloud (cloud.buladmin.eu)');
+  pdf.setProducer('BulAdmin Cloud');
+  pdf.setLanguage('bg-BG');
+  const W = A4[0] - 2 * M;
+  let page;
+  let y;
+  const width = (text, size, f = font) => f.widthOfTextAtSize(plain(text), size);
+  const draw = (text, x, yy, { size = 10, f = font, c = NAVY, align = 'left' } = {}) => {
+    const t = plain(text);
+    let xx = x;
+    if (align === 'right') xx = x - width(t, size, f);
+    if (align === 'center') xx = x - width(t, size, f) / 2;
+    page.drawText(t, { x: xx, y: yy, size, font: f, color: color(c) });
+  };
+  const wrap = (text, maxWidth, size, f = font) => {
+    const lines = [];
+    for (const paragraph of plain(text).split('\n')) {
+      let current = '';
+      for (const word of paragraph.split(' ')) {
+        const candidate = current ? `${current} ${word}` : word;
+        if (width(candidate, size, f) <= maxWidth) { current = candidate; continue; }
+        if (current) lines.push(current);
+        current = word;
+        while (width(current, size, f) > maxWidth) {
+          let cut = current.length - 1;
+          while (cut > 1 && width(current.slice(0, cut), size, f) > maxWidth) cut--;
+          lines.push(current.slice(0, cut));
+          current = current.slice(cut);
+        }
+      }
+      lines.push(current);
+    }
+    return lines;
+  };
+  const newPage = () => { page = pdf.addPage(A4); y = A4[1] - M; };
+  const need = (h) => { if (y - h < 80) newPage(); };
+  const hline = (yy, c = LINE, thickness = 0.8, x1 = M, x2 = A4[0] - M) => page.drawLine({ start: { x: x1, y: yy }, end: { x: x2, y: yy }, thickness, color: color(c) });
+
+  newPage();
+  // Издател горе вляво (лого, име и данни), адресат горе вдясно.
+  const issuer = spec.issuer || {};
+  let leftBottom = y;
+  if (spec.logo?.bytes) {
+    try {
+      const image = spec.logo.type === 'image/png' ? await pdf.embedPng(spec.logo.bytes) : await pdf.embedJpg(spec.logo.bytes);
+      const scale = Math.min(150 / image.width, 48 / image.height, 1);
+      page.drawImage(image, { x: M, y: y - image.height * scale, width: image.width * scale, height: image.height * scale });
+      leftBottom = y - image.height * scale - 4;
+    } catch { /* повредено лого не спира документа */ }
+  }
+  if (issuer.name) {
+    const details = partyLines(issuer).flatMap((l) => wrap(l, W * 0.5, 8.5));
+    draw(issuer.name, M, leftBottom - 11, { size: 10.5, f: fontBold });
+    details.forEach((l, i) => draw(l, M, leftBottom - 24 - i * 11, { size: 8.5, c: INK2 }));
+    leftBottom -= 24 + details.length * 11;
+  }
+  let rightBottom = y;
+  if (spec.to) {
+    const x = M + W * 0.56;
+    draw(spec.to.label || 'ДО', x, y - 11, { size: 8, f: fontBold, c: INK2 });
+    const lines = spec.to.lines.filter(Boolean).flatMap((l, i) => wrap(l, W * 0.44, i === 0 ? 10 : 9, i === 0 ? fontBold : font).map((t) => [t, i === 0]));
+    lines.forEach(([t, strong], i) => draw(t, x, y - 25 - i * 12, { size: strong ? 10 : 9, f: strong ? fontBold : font }));
+    rightBottom = y - 25 - lines.length * 12;
+  }
+  y = Math.min(leftBottom, rightBottom) - 24;
+
+  // Заглавие в средата.
+  for (const t of wrap(spec.title.toUpperCase(), W - 40, 15, fontBold)) {
+    draw(t, A4[0] / 2, y, { size: 15, f: fontBold, align: 'center' });
+    y -= 18;
+  }
+  for (const line of [spec.subtitle, spec.number && `№ ${spec.number}${spec.date ? ` от ${date(spec.date)}` : ''}`].filter(Boolean)) {
+    for (const t of wrap(line, W - 60, 10)) {
+      draw(t, A4[0] / 2, y, { size: 10, align: 'center', c: INK2 });
+      y -= 13;
+    }
+  }
+  y -= 2;
+  hline(y, GOLD, 1.6, A4[0] / 2 - 40, A4[0] / 2 + 40);
+  y -= 24;
+
+  const paragraph = (text, { size = 10, f = font, indent = 0, gap = 7, c = NAVY } = {}) => {
+    // „15.11.2026 г.“ в края на изречение: без втора точка.
+    for (const t of wrap(String(text).replace(/ г\.\./g, ' г.'), W - indent, size, f)) {
+      need(size + 4);
+      draw(t, M + indent, y, { size, f, c });
+      y -= size + 4;
+    }
+    y -= gap;
+  };
+  for (const block of spec.blocks || []) {
+    if (!block) continue;
+    if (block.space) { y -= block.space; continue; }
+    if (block.h) { need(34); y -= 4; paragraph(block.h, { size: 10.5, f: fontBold, gap: 4 }); continue; }
+    if (block.p) { paragraph(block.p, { size: block.size || 10, f: block.bold ? fontBold : font, c: block.muted ? INK2 : NAVY }); continue; }
+    if (block.list) {
+      block.list.filter(Boolean).forEach((item, i) => {
+        const marker = block.numbered === false ? '•' : `${i + 1}.`;
+        wrap(item, W - 22, 10).forEach((t, j) => {
+          need(14);
+          if (j === 0) draw(marker, M + 4, y, { size: 10 });
+          draw(t, M + 22, y, { size: 10 });
+          y -= 14;
+        });
+        y -= 2;
+      });
+      y -= 6;
+      continue;
+    }
+    if (block.kv) {
+      const labelW = block.labelWidth || 160;
+      for (const [label, value, strong] of block.kv) {
+        const lines = wrap(String(value ?? ''), W - labelW, 10, strong ? fontBold : font);
+        const labels = wrap(label, labelW - 10, 9);
+        need(Math.max(lines.length, labels.length) * 14);
+        labels.forEach((t, i) => draw(t, M, y - i * 13, { size: 9, c: INK2 }));
+        lines.forEach((t, i) => draw(t, M + labelW, y - i * 14, { size: 10, f: strong ? fontBold : font }));
+        y -= Math.max(lines.length * 14, labels.length * 13) + 5;
+      }
+      y -= 6;
+      continue;
+    }
+    if (block.table) {
+      const { cols, rows, foot = [] } = block.table;
+      const sum = cols.reduce((s, c) => s + c.w, 0);
+      const widths = cols.map((c) => (c.w / sum) * W);
+      const xs = widths.reduce((acc, w, i) => [...acc, i ? acc[i - 1] + widths[i - 1] : M], []);
+      const header = () => {
+        need(40);
+        page.drawRectangle({ x: M, y: y - 6, width: W, height: 18, color: color(TINT) });
+        cols.forEach((c, i) => draw(c.label, c.right ? xs[i] + widths[i] - 4 : xs[i] + 4, y, { size: 8, f: fontBold, c: INK2, align: c.right ? 'right' : 'left' }));
+        y -= 20;
+      };
+      header();
+      const row = (cells, strong) => {
+        const wrapped = cells.map((v, i) => wrap(String(v ?? ''), widths[i] - 8, 9, strong ? fontBold : font));
+        const h = Math.max(...wrapped.map((w) => w.length)) * 11 + 6;
+        if (y - h < 80) { newPage(); header(); }
+        wrapped.forEach((lines, i) => lines.forEach((t, j) => draw(t, cols[i].right ? xs[i] + widths[i] - 4 : xs[i] + 4, y - j * 11, { size: 9, f: strong ? fontBold : font, align: cols[i].right ? 'right' : 'left' })));
+        y -= h;
+        hline(y + 8);
+      };
+      rows.forEach((r) => row(r, false));
+      foot.forEach((r) => row(r, true));
+      y -= 10;
+    }
+  }
+
+  // Дата, място и подписи.
+  const signs = spec.signatures || [];
+  const perRow = Math.min(signs.length, 3) || 1;
+  need(40 + Math.ceil(signs.length / 3) * 72);
+  y -= 6;
+  if (spec.dateLine !== false && (spec.date !== undefined || spec.place)) {
+    draw(`Дата: ${date(spec.date) || '……………………'}`, M, y, { size: 10 });
+    if (spec.place) draw(`гр./с. ${spec.place}`, M, y - 14, { size: 10 });
+    y -= 40;
+  }
+  const colW = W / perRow;
+  signs.forEach((s, i) => {
+    const x = signs.length === 1 ? M + W * 0.55 : M + (i % 3) * colW;
+    const yy = y - Math.floor(i / 3) * 72;
+    const lineW = signs.length === 1 ? W * 0.45 : colW - 16;
+    draw(`${s.label}:`, x, yy, { size: 9, c: INK2 });
+    hline(yy - 24, NAVY, 0.6, x, x + lineW);
+    if (s.name) draw(s.name, x, yy - 36, { size: 9 });
+    if (s.role) draw(s.role, x, yy - 48, { size: 8, c: INK2 });
+  });
+
+  const pages = pdf.getPages();
+  pages.forEach((p, i) => {
+    page = p;
+    if (spec.note && i === pages.length - 1) {
+      const lines = wrap(spec.note, W, 7.5);
+      lines.forEach((t, j) => draw(t, M, 56 + (lines.length - 1 - j) * 9, { size: 7.5, c: INK2 }));
+    }
+    hline(46, LINE, 0.6);
+    draw(FOOTER, M, 32, { size: 7.5, c: INK2 });
+    draw(`${spec.title}${spec.number ? ` ${spec.number}` : ''} · страница ${i + 1} от ${pages.length}`, A4[0] - M, 32, { size: 7.5, c: INK2, align: 'right' });
+  });
+  return pdf.save();
 }
